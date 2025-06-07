@@ -394,6 +394,7 @@ function generateMockRecommendation(tripData) {
 }
 
 // Send email notification
+// Send email notification with user points
 async function sendNewTripNotification(tripId, tripData) {
     const sgMailInstance = initSendGrid();
     
@@ -402,12 +403,83 @@ async function sendNewTripNotification(tripId, tripData) {
         return;
     }
     
+    // Fetch user profile and points data
+    let userEmail = 'Not available';
+    let userName = 'Not available';
+    let pointsData = {
+        creditCard: {},
+        hotel: {},
+        airline: {},
+        totalPoints: 0
+    };
+    
+    try {
+        // Get user profile from Firestore (for basic user info)
+        const userProfileDoc = await db.collection('users').doc(tripData.userId).get();
+        if (userProfileDoc.exists) {
+            const userData = userProfileDoc.data();
+            userEmail = userData.email || 'Not available';
+            userName = userData.name || userData.displayName || 'Not available';
+        }
+        
+        // Get user points from separate collection
+        const userPointsDoc = await db.collection('userPoints').doc(tripData.userId).get();
+        if (userPointsDoc.exists) {
+            const pointsDoc = userPointsDoc.data();
+            pointsData.creditCard = pointsDoc.creditCardPoints || {};
+            pointsData.hotel = pointsDoc.hotelPoints || {};
+            pointsData.airline = pointsDoc.airlinePoints || {};
+            
+            // Calculate total points across all categories
+            const creditCardTotal = Object.values(pointsData.creditCard).reduce((sum, points) => sum + (points || 0), 0);
+            const hotelTotal = Object.values(pointsData.hotel).reduce((sum, points) => sum + (points || 0), 0);
+            const airlineTotal = Object.values(pointsData.airline).reduce((sum, points) => sum + (points || 0), 0);
+            pointsData.totalPoints = creditCardTotal + hotelTotal + airlineTotal;
+        }
+        
+    } catch (error) {
+        console.warn('Could not fetch user data:', error);
+        // Continue with email sending even if we can't get user data
+    }
+    
+    // Helper function to format points breakdown
+    const formatPointsBreakdown = (pointsCategory, categoryName) => {
+        const entries = Object.entries(pointsCategory);
+        if (entries.length === 0) return `<p><strong>${categoryName}:</strong> None</p>`;
+        
+        return `
+            <p><strong>${categoryName}:</strong></p>
+            <ul style="margin: 0; padding-left: 20px;">
+                ${entries.map(([provider, points]) => 
+                    `<li>${provider}: ${points.toLocaleString()} pts</li>`
+                ).join('')}
+            </ul>
+        `;
+    };
+    
     const msg = {
         to: 'nchristus93@gmail.com',
         from: 'no-reply@em6158.nickstravelconsulting.com',
-        subject: `New Trip Request - ${tripData.destination} (${tripData.preferences?.groupSize || 1} ${tripData.preferences?.groupSize === 1 ? 'traveler' : 'travelers'})`,
+        subject: `New Trip Request - ${tripData.destination} (${tripData.groupSize || 1} ${(tripData.groupSize || 1) === 1 ? 'traveler' : 'travelers'}) - ${pointsData.totalPoints.toLocaleString()} total pts`,
         html: `
             <h2>🌍 New Trip Request</h2>
+            
+            <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #ffc107;">
+                <h3>👤 Client Info</h3>
+                <p><strong>Name:</strong> ${userName}</p>
+                <p><strong>Email:</strong> ${userEmail}</p>
+                <p><strong>Total Points:</strong> <span style="font-size: 1.2em; color: #28a745; font-weight: bold;">${pointsData.totalPoints.toLocaleString()}</span></p>
+                <p><strong>User ID:</strong> ${tripData.userId}</p>
+                <p><strong>Trip ID:</strong> ${tripId}</p>
+            </div>
+            
+            <div style="background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #28a745;">
+                <h3>💳 Points & Miles Breakdown</h3>
+                ${formatPointsBreakdown(pointsData.creditCard, 'Credit Card Points')}
+                ${formatPointsBreakdown(pointsData.hotel, 'Hotel Points')}
+                ${formatPointsBreakdown(pointsData.airline, 'Airline Miles')}
+            </div>
+            
             <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 16px 0;">
                 <h3>📍 Trip Details</h3>
                 <p><strong>Destination:</strong> ${tripData.destination}</p>
@@ -418,18 +490,17 @@ async function sendNewTripNotification(tripId, tripData) {
             
             <div style="background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 16px 0;">
                 <h3>✨ Client Preferences</h3>
-                <p><strong>Budget:</strong> ${tripData.preferences?.budget || 'Not specified'}</p>
-                <p><strong>Travel Style:</strong> ${tripData.preferences?.travelStyle || 'Not specified'}</p>
-                <p><strong>Group Size:</strong> ${tripData.preferences?.groupSize || 1} ${tripData.preferences?.groupSize === 1 ? 'person' : 'people'}</p>
-                <p><strong>Interests:</strong> ${tripData.preferences?.interests?.join(', ') || 'None specified'}</p>
-                ${tripData.preferences?.specialRequests ? `<p><strong>Special Requests:</strong> ${tripData.preferences.specialRequests}</p>` : ''}
+                <p><strong>Budget:</strong> ${tripData.budget || 'Not specified'}</p>
+                <p><strong>Travel Style:</strong> ${tripData.travelStyle || 'Not specified'}</p>
+                <p><strong>Group Size:</strong> ${tripData.groupSize || 1} ${(tripData.groupSize || 1) === 1 ? 'person' : 'people'}</p>
+                <p><strong>Interests:</strong> ${tripData.interests?.join(', ') || 'None specified'}</p>
+                ${tripData.specialRequests ? `<p><strong>Special Requests:</strong> ${tripData.specialRequests}</p>` : ''}
             </div>
             
             <div style="background: #f3e5f5; padding: 20px; border-radius: 8px; margin: 16px 0;">
-                <h3>👤 Client Info</h3>
-                <p><strong>Trip ID:</strong> ${tripId}</p>
-                <p><strong>User ID:</strong> ${tripData.userId}</p>
+                <h3>📊 Submission Info</h3>
                 <p><strong>Submitted:</strong> ${new Date().toLocaleString()}</p>
+                <p><strong>Status:</strong> Processing</p>
             </div>
             
             <hr style="margin: 24px 0;">
@@ -438,7 +509,7 @@ async function sendNewTripNotification(tripId, tripData) {
     };
 
     await sgMailInstance.send(msg);
-    console.log(`Email notification sent for trip: ${tripId}`);
+    console.log(`Email notification sent for trip: ${tripId} (User: ${userName}, Total Points: ${pointsData.totalPoints.toLocaleString()})`);
 }
 
 // Handle trip status updates
