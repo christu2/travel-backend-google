@@ -2,9 +2,17 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Helper function to check if user is admin
+    function isAdmin() {
+      return request.auth != null && 
+        request.auth.token.admin == true;
+    }
+    
     // Users can only access their own user document
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
+      // Admin can access all user documents
+      allow read, write: if isAdmin();
     }
     
     // Users can only access their own trips
@@ -13,11 +21,15 @@ service cloud.firestore {
         request.auth.uid == resource.data.userId;
       allow create: if request.auth != null && 
         request.auth.uid == request.resource.data.userId;
+      // Admin can access all trips
+      allow read, write: if isAdmin();
     }
     
     // Users can only access their own points
     match /userPoints/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
+      // Admin can access all user points
+      allow read, write: if isAdmin();
     }
     
     // User submission tracking (for rate limiting)
@@ -25,10 +37,40 @@ service cloud.firestore {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
     
-    // Admin access for processing trips (you can modify this for your admin needs)
-    match /admin/{document=**} {
+    // Admin notifications (for email notifications, etc.)
+    match /adminNotifications/{notificationId} {
+      allow read, write: if isAdmin();
+      allow create: if request.auth != null;
+    }
+    
+    // Trip conversations - users can access conversations for their own trips
+    match /tripConversations/{conversationId} {
       allow read, write: if request.auth != null && 
-        request.auth.token.email == "nchristus93@gmail.com";
+        request.auth.uid == resource.data.userId;
+      allow create: if request.auth != null && 
+        request.auth.uid == request.resource.data.userId;
+      
+      // Allow access to messages within conversations
+      match /messages/{messageId} {
+        allow read, write: if request.auth != null && 
+          request.auth.uid == get(/databases/$(database)/documents/tripConversations/$(conversationId)).data.userId;
+        allow create: if request.auth != null && 
+          request.auth.uid == get(/databases/$(database)/documents/tripConversations/$(conversationId)).data.userId;
+      }
+    }
+    
+    // Admin access for processing trips and conversations
+    match /admin/{document=**} {
+      allow read, write: if isAdmin();
+    }
+    
+    // Admin access to all conversations (for admin dashboard)
+    match /tripConversations/{conversationId} {
+      allow read, write: if isAdmin();
+      
+      match /messages/{messageId} {
+        allow read, write: if isAdmin();
+      }
     }
   }
 }

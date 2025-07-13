@@ -13,6 +13,22 @@
       "runtime": "nodejs20"
     }
   ],
+  "hosting": {
+    "public": "../travelAdmin",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "**/*.js",
+      "**/*.md"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/admin-dashboard.html"
+      }
+    ]
+  },
   "firestore": {
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
