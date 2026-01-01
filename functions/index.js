@@ -3,6 +3,7 @@ const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
+const { validateTripSubmissionData, validateRecommendationData } = require("./schemas");
 
 // Initialize Firebase Admin
 initializeApp();
@@ -71,23 +72,46 @@ exports.submitTrip = onRequest(
             const idToken = authHeader.split('Bearer ')[1];
             const decodedToken = await auth.verifyIdToken(idToken);
             const uid = decodedToken.uid;
-            
+
             const data = req.body;
-            
+
+            // Schema validation with detailed error reporting
+            const validation = validateTripSubmissionData(data);
+            if (!validation.valid) {
+                console.error('Schema validation failed:', validation.errors);
+                const errorMessages = validation.errors.map(err =>
+                    `${err.field}: ${err.message}`
+                ).join('; ');
+                res.status(400).json({
+                    error: 'Validation failed',
+                    details: validation.errors,
+                    message: errorMessages
+                });
+                return;
+            }
+
             // Sanitize and validate required fields - support both old and new formats
             const destination = sanitizeString(data.destination || (data.destinations && data.destinations[0]));
-            const destinations = data.destinations ? data.destinations.map(d => sanitizeString(d)) : (data.destination ? [sanitizeString(data.destination)] : []);
+            const destinations = data.destinations ? data.destinations.map(d => sanitizeString(d)).filter(d => d) : (data.destination ? [sanitizeString(data.destination)] : []);
             const departureLocation = sanitizeString(data.departureLocation) || null;
-            
-            if (!destination || !data.startDate || !data.endDate) {
+
+            // Validate required fields with proper array validation
+            if (destinations.length === 0 || !data.startDate || !data.endDate) {
                 console.error('Missing required fields:', {
                     destination: !!destination,
                     destinations: destinations.length > 0,
+                    destinationsCount: destinations.length,
                     startDate: !!data.startDate,
                     endDate: !!data.endDate,
                     departureLocation: !!departureLocation
                 });
-                res.status(400).send('Missing required fields: destination(s), startDate, endDate');
+                res.status(400).send('Missing required fields: at least one destination, startDate, and endDate are required');
+                return;
+            }
+
+            // Additional validation: destinations array limit
+            if (destinations.length > 5) {
+                res.status(400).send('Maximum 5 destinations allowed per trip');
                 return;
             }
             
@@ -256,9 +280,24 @@ exports.updateTripRecommendation = onRequest(
             }
             
             const { tripId, recommendation } = req.body;
-            
+
             if (!tripId || !recommendation) {
                 res.status(400).send('Missing tripId or recommendation');
+                return;
+            }
+
+            // Schema validation for recommendation data
+            const validation = validateRecommendationData(recommendation);
+            if (!validation.valid) {
+                console.error('Recommendation schema validation failed:', validation.errors);
+                const errorMessages = validation.errors.map(err =>
+                    `${err.field}: ${err.message}`
+                ).join('; ');
+                res.status(400).json({
+                    error: 'Recommendation validation failed',
+                    details: validation.errors,
+                    message: errorMessages
+                });
                 return;
             }
             

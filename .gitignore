@@ -42,4 +42,5 @@ build/
 
 # Temporary files
 .tmp/
-temp/
+temp/# Coverage directory (Jest test output)
+functions/coverage/
