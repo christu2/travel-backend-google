@@ -4,27 +4,18 @@
  * This module provides comprehensive schema validation for all API endpoints
  * to ensure data integrity and prevent malformed data from reaching Firestore.
  *
- * IMPORTANT: This file now uses shared schemas from /shared-schemas/
+ * IMPORTANT: This file now uses @wandermint/shared-schemas NPM package
  * These schemas are the single source of truth across iOS, Backend, and Admin.
  */
 
 const Ajv = require('ajv');
 const addFormats = require('ajv-formats');
-const fs = require('fs');
-const path = require('path');
+const { schemas } = require('@wandermint/shared-schemas');
 
-// Load shared schemas (single source of truth)
-const budgetSchema = JSON.parse(
-    fs.readFileSync(path.join(__dirname, 'shared-schemas/schemas/core/budget.schema.json'), 'utf8')
-);
-
-const travelStyleSchema = JSON.parse(
-    fs.readFileSync(path.join(__dirname, 'shared-schemas/schemas/core/travel-style.schema.json'), 'utf8')
-);
-
-const commonTypesSchema = JSON.parse(
-    fs.readFileSync(path.join(__dirname, 'shared-schemas/schemas/core/common-types.schema.json'), 'utf8')
-);
+// Extract schemas from package
+const budgetSchema = schemas.budget;
+const travelStyleSchema = schemas.travelStyle;
+const commonTypesSchema = schemas.commonTypes;
 
 // Initialize AJV with custom options
 const ajv = new Ajv({
