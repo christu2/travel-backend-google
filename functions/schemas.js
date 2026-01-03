@@ -3,21 +3,45 @@
  *
  * This module provides comprehensive schema validation for all API endpoints
  * to ensure data integrity and prevent malformed data from reaching Firestore.
+ *
+ * IMPORTANT: This file now uses shared schemas from /shared-schemas/
+ * These schemas are the single source of truth across iOS, Backend, and Admin.
  */
 
 const Ajv = require('ajv');
 const addFormats = require('ajv-formats');
+const fs = require('fs');
+const path = require('path');
+
+// Load shared schemas (single source of truth)
+const budgetSchema = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'shared-schemas/schemas/core/budget.schema.json'), 'utf8')
+);
+
+const travelStyleSchema = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'shared-schemas/schemas/core/travel-style.schema.json'), 'utf8')
+);
+
+const commonTypesSchema = JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'shared-schemas/schemas/core/common-types.schema.json'), 'utf8')
+);
 
 // Initialize AJV with custom options
 const ajv = new Ajv({
     allErrors: true,        // Collect all errors, not just the first one
     removeAdditional: true, // Remove additional properties not in schema
     useDefaults: true,      // Apply default values from schema
-    coerceTypes: true       // Coerce types (e.g., "123" to 123)
+    coerceTypes: false,     // Don't coerce types - enforce strict validation
+    strict: false           // Allow metadata fields like version, changelog
 });
 
 // Add format validators (date, email, uri, etc.)
 addFormats(ajv);
+
+// Add shared schemas to AJV
+ajv.addSchema(budgetSchema, 'budget.schema.json');
+ajv.addSchema(travelStyleSchema, 'travel-style.schema.json');
+ajv.addSchema(commonTypesSchema, 'common-types.schema.json');
 
 /**
  * Trip Submission Schema
@@ -51,10 +75,8 @@ const tripSubmissionSchema = {
             description: 'Trip end date in YYYY-MM-DD format'
         },
         travelStyle: {
-            type: 'string',
-            minLength: 1,
-            maxLength: 50,
-            description: 'User travel style preference'
+            $ref: 'travel-style.schema.json',
+            description: 'Travel style preference (pace and type, NOT budget)'
         },
         groupSize: {
             type: 'integer',
@@ -82,9 +104,8 @@ const tripSubmissionSchema = {
             description: 'Trip duration in days (for flexible dates)'
         },
         budget: {
-            type: 'string',
-            enum: ['Budget', 'Comfortable', 'Mid-range', 'Luxury', 'Ultra-Luxury'],
-            description: 'Budget level'
+            $ref: 'budget.schema.json',
+            description: 'Budget preference level (NOT a monetary amount like $1500)'
         },
         specialRequests: {
             type: 'string',

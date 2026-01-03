@@ -1,0 +1,194 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://wandermint.com/schemas/trip-submission.schema.json",
+  "title": "TripSubmission",
+  "description": "User trip submission from iOS app - sent to Backend submitTrip endpoint",
+  "type": "object",
+  "required": [
+    "destinations",
+    "startDate",
+    "endDate",
+    "travelStyle",
+    "groupSize"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "destinations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "description": "Array of destination city names (1-5 destinations)",
+      "examples": [
+        ["Paris"],
+        ["Paris", "Lyon", "Nice"]
+      ]
+    },
+    "departureLocation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "City where user departs from",
+      "examples": [
+        "New York",
+        "San Francisco"
+      ]
+    },
+    "startDate": {
+      "$ref": "common-types.schema.json#/$defs/ISODate",
+      "description": "Trip start date"
+    },
+    "endDate": {
+      "$ref": "common-types.schema.json#/$defs/ISODate",
+      "description": "Trip end date (must be after startDate)"
+    },
+    "flexibleDates": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether dates are flexible"
+    },
+    "tripDuration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 90,
+      "description": "Trip duration in days (for flexible dates)"
+    },
+    "budget": {
+      "$ref": "budget.schema.json",
+      "description": "Budget preference level (NOT a monetary amount)"
+    },
+    "travelStyle": {
+      "$ref": "travel-style.schema.json",
+      "description": "Travel style preference (pace and type)"
+    },
+    "groupSize": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "description": "Number of travelers"
+    },
+    "interests": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "maxLength": 50
+      },
+      "description": "User interests (e.g., Food, Culture, Hiking)",
+      "examples": [
+        ["Food", "Culture", "Museums"]
+      ]
+    },
+    "specialRequests": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "Special requests or notes"
+    },
+    "flightClass": {
+      "$ref": "common-types.schema.json#/$defs/FlightClass",
+      "description": "Preferred flight cabin class"
+    },
+    "paymentMethod": {
+      "type": "string",
+      "enum": [
+        "cash",
+        "points",
+        "hybrid"
+      ],
+      "description": "Payment preference"
+    }
+  },
+  "version": "2.0.0",
+  "lastUpdated": "2026-01-02",
+  "changelog": [
+    {
+      "version": "2.0.0",
+      "date": "2026-01-02",
+      "changes": [
+        "Fixed budget and travelStyle schema references",
+        "Added proper validation for budget (enum, not monetary amount)",
+        "Aligned travelStyle enum with iOS app"
+      ],
+      "breaking": true
+    },
+    {
+      "version": "1.0.0",
+      "date": "2024-07-01",
+      "changes": [
+        "Initial schema definition"
+      ],
+      "breaking": false
+    }
+  ],
+  "examples": [
+    {
+      "destinations": ["Paris"],
+      "departureLocation": "New York",
+      "startDate": "2026-06-15",
+      "endDate": "2026-06-22",
+      "flexibleDates": false,
+      "budget": "Comfortable",
+      "travelStyle": "Adventure",
+      "groupSize": 2,
+      "interests": ["Food", "Culture"],
+      "specialRequests": "Prefer walking tours",
+      "flightClass": "Economy"
+    },
+    {
+      "destinations": ["Paris", "Lyon", "Nice"],
+      "startDate": "2026-06-15",
+      "endDate": "2026-06-30",
+      "budget": "Luxury",
+      "travelStyle": "Relaxation",
+      "groupSize": 4
+    }
+  ],
+  "invalidExamples": [
+    {
+      "comment": "Empty destinations array",
+      "data": {
+        "destinations": [],
+        "startDate": "2026-06-15",
+        "endDate": "2026-06-22",
+        "travelStyle": "Comfortable",
+        "groupSize": 2
+      }
+    },
+    {
+      "comment": "Budget as monetary amount instead of enum",
+      "data": {
+        "destinations": ["Paris"],
+        "startDate": "2026-06-15",
+        "endDate": "2026-06-22",
+        "budget": "$1500",
+        "travelStyle": "Adventure",
+        "groupSize": 2
+      }
+    },
+    {
+      "comment": "Invalid travelStyle (budget-only value)",
+      "data": {
+        "destinations": ["Paris"],
+        "startDate": "2026-06-15",
+        "endDate": "2026-06-22",
+        "budget": "Comfortable",
+        "travelStyle": "Mid-range",
+        "groupSize": 2
+      }
+    },
+    {
+      "comment": "More than 5 destinations",
+      "data": {
+        "destinations": ["Paris", "Lyon", "Nice", "Marseille", "Bordeaux", "Toulouse"],
+        "startDate": "2026-06-15",
+        "endDate": "2026-06-30",
+        "travelStyle": "Comfortable",
+        "groupSize": 2
+      }
+    }
+  ]
+}

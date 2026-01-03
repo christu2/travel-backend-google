@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://wandermint.com/schemas/budget.schema.json",
+  "title": "Budget",
+  "description": "Travel budget preference levels - determines accommodation and activity pricing tiers",
+  "type": "string",
+  "enum": [
+    "Budget",
+    "Comfortable",
+    "Mid-range",
+    "Luxury",
+    "Ultra-Luxury"
+  ],
+  "version": "1.0.0",
+  "lastUpdated": "2026-01-02",
+  "changelog": [
+    {
+      "version": "1.0.0",
+      "date": "2026-01-02",
+      "changes": [
+        "Initial schema definition",
+        "Five budget levels defined",
+        "Used by iOS app, Backend API, Admin dashboard"
+      ],
+      "breaking": false
+    }
+  ],
+  "platforms": {
+    "ios": "Required in TripSubmission model",
+    "backend": "Validated in submitTrip endpoint",
+    "admin": "Displayed in trip detail view"
+  },
+  "examples": [
+    "Budget",
+    "Comfortable",
+    "Mid-range",
+    "Luxury",
+    "Ultra-Luxury"
+  ],
+  "notes": [
+    "IMPORTANT: This is different from travelStyle",
+    "Budget controls PRICING tier (how much to spend)",
+    "TravelStyle controls PACE and TYPE (Adventure vs Relaxation)",
+    "A user can have budget='Budget' and travelStyle='Adventure'",
+    "Do NOT confuse with monetary amounts like '$1500'"
+  ],
+  "invalidExamples": [
+    "$1500",
+    "Ultrabudget",
+    "Premium",
+    "Standard",
+    "Economy",
+    "Adventure",
+    "Relaxation"
+  ]
+}

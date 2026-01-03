@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://wandermint.com/schemas/travel-style.schema.json",
+  "title": "TravelStyle",
+  "description": "Travel preference style or pace - defines the TYPE and PACE of travel, NOT the budget",
+  "type": "string",
+  "enum": [
+    "Budget",
+    "Comfortable",
+    "Luxury",
+    "Adventure",
+    "Relaxation"
+  ],
+  "version": "2.0.0",
+  "lastUpdated": "2026-01-02",
+  "changelog": [
+    {
+      "version": "2.0.0",
+      "date": "2026-01-02",
+      "changes": [
+        "Fixed schema mismatch: added Adventure and Relaxation",
+        "Removed Mid-range and Ultra-Luxury (budget-only values)",
+        "Aligned with iOS app travelStyles array"
+      ],
+      "breaking": true,
+      "migration": "If using Mid-range, map to Comfortable. If using Ultra-Luxury, map to Luxury."
+    },
+    {
+      "version": "1.0.0",
+      "date": "2024-07-01",
+      "changes": [
+        "Initial schema definition"
+      ],
+      "breaking": false
+    }
+  ],
+  "platforms": {
+    "ios": "Used in TripSubmissionView picker (line 59)",
+    "backend": "Validated in submitTrip endpoint",
+    "admin": "Displayed in trip summary"
+  },
+  "examples": [
+    "Budget",
+    "Comfortable",
+    "Luxury",
+    "Adventure",
+    "Relaxation"
+  ],
+  "notes": [
+    "IMPORTANT: This is different from budget",
+    "TravelStyle controls PACE and TYPE (fast-paced vs slow, active vs restful)",
+    "Budget controls PRICING tier",
+    "Adventure and Relaxation are ONLY valid for travelStyle, NOT budget",
+    "Mid-range and Ultra-Luxury are ONLY valid for budget, NOT travelStyle"
+  ],
+  "semantics": {
+    "Budget": "Budget-conscious travel style with basic accommodations",
+    "Comfortable": "Moderate comfort with good value",
+    "Luxury": "High-end experiences and premium services",
+    "Adventure": "Active, fast-paced, outdoor/adventure-focused",
+    "Relaxation": "Slow-paced, restful, spa/beach-focused"
+  },
+  "invalidExamples": [
+    "Mid-range",
+    "Ultra-Luxury",
+    "Hiking",
+    "Extreme",
+    "Lazy",
+    "Moderate",
+    "$1500"
+  ]
+}

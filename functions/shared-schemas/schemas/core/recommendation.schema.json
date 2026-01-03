@@ -1,0 +1,275 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://wandermint.com/schemas/recommendation.schema.json",
+  "title": "TripRecommendation",
+  "description": "Trip recommendation sent from Admin dashboard or Backend to iOS app",
+  "type": "object",
+  "required": [
+    "id",
+    "tripOverview",
+    "destinations",
+    "totalCost"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique recommendation identifier"
+    },
+    "tripOverview": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 5000,
+      "description": "Overall trip summary and highlights"
+    },
+    "destinations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "cityName",
+          "arrivalDate",
+          "departureDate",
+          "numberOfNights"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "cityName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "arrivalDate": {
+            "$ref": "common-types.schema.json#/$defs/ISODate"
+          },
+          "departureDate": {
+            "$ref": "common-types.schema.json#/$defs/ISODate"
+          },
+          "numberOfNights": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 90
+          },
+          "overview": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "accommodationOptions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "priority", "hotel"],
+              "properties": {
+                "id": {"type": "string"},
+                "priority": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5
+                },
+                "hotel": {
+                  "type": "object",
+                  "required": ["name", "rating", "location"],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "rating": {
+                      "type": "number",
+                      "minimum": 1,
+                      "maximum": 5
+                    },
+                    "pricePerNight": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100000
+                    },
+                    "pointsPerNight": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "loyaltyProgram": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "location": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "bookingUrl": {
+                      "$ref": "common-types.schema.json#/$defs/URL"
+                    },
+                    "detailedDescription": {
+                      "type": "string",
+                      "maxLength": 5000
+                    },
+                    "tripadvisorId": {
+                      "type": "string",
+                      "maxLength": 50
+                    },
+                    "tripadvisorUrl": {
+                      "$ref": "common-types.schema.json#/$defs/URL"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "recommendedActivities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "description", "location", "estimatedCost", "estimatedDuration", "category"],
+              "properties": {
+                "id": {"type": "string"},
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "location": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "estimatedCost": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100000
+                },
+                "estimatedDuration": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "category": {
+                  "type": "string",
+                  "maxLength": 50
+                }
+              }
+            }
+          },
+          "recommendedRestaurants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "cuisine", "location", "priceRange", "description"],
+              "properties": {
+                "id": {"type": "string"},
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "cuisine": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "location": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "priceRange": {
+                  "type": "string",
+                  "enum": ["$", "$$", "$$$", "$$$$"]
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 2000
+                }
+              }
+            }
+          },
+          "logistics": {
+            "type": "object",
+            "properties": {
+              "flights": {"type": "array"},
+              "trains": {"type": "array"},
+              "buses": {"type": "array"},
+              "ferries": {"type": "array"},
+              "carRentals": {"type": "array"}
+            }
+          }
+        }
+      }
+    },
+    "totalCost": {
+      "type": "object",
+      "required": ["totalEstimate", "currency"],
+      "properties": {
+        "totalEstimate": {
+          "type": "number",
+          "minimum": 0
+        },
+        "flights": {
+          "type": "number",
+          "minimum": 0
+        },
+        "accommodation": {
+          "type": "number",
+          "minimum": 0
+        },
+        "activities": {
+          "type": "number",
+          "minimum": 0
+        },
+        "food": {
+          "type": "number",
+          "minimum": 0
+        },
+        "localTransport": {
+          "type": "number",
+          "minimum": 0
+        },
+        "miscellaneous": {
+          "type": "number",
+          "minimum": 0
+        },
+        "currency": {
+          "$ref": "common-types.schema.json#/$defs/CurrencyCode"
+        }
+      }
+    },
+    "bookingLinks": {
+      "type": "object",
+      "properties": {
+        "flights": {
+          "$ref": "common-types.schema.json#/$defs/URL"
+        },
+        "hotels": {
+          "type": "array",
+          "items": {
+            "$ref": "common-types.schema.json#/$defs/URL"
+          }
+        }
+      }
+    },
+    "specialNotes": {
+      "type": "string",
+      "maxLength": 2000
+    }
+  },
+  "version": "1.0.0",
+  "lastUpdated": "2026-01-02",
+  "changelog": [
+    {
+      "version": "1.0.0",
+      "date": "2026-01-02",
+      "changes": [
+        "Initial recommendation schema definition",
+        "Aligned with Backend validation and iOS parsing"
+      ],
+      "breaking": false
+    }
+  ]
+}
