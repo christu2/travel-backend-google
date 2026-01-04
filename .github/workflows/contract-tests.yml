@@ -1,0 +1,58 @@
+name: Contract Tests
+
+on:
+  pull_request:
+    paths:
+      - 'functions/schemas.js'
+      - 'functions/package.json'
+      - 'functions/package-lock.json'
+      - 'functions/test/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'functions/schemas.js'
+      - 'functions/package.json'
+      - 'functions/package-lock.json'
+      - 'functions/test/**'
+
+jobs:
+  contract-tests:
+    name: Validate Backend Contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install dependencies
+        working-directory: functions
+        run: npm ci
+
+      - name: Run all tests (including contract tests)
+        working-directory: functions
+        run: npm test
+
+      - name: Run contract tests specifically
+        working-directory: functions
+        run: npm test contract-validation.test.js
+
+      - name: Check shared-schemas version
+        working-directory: functions
+        run: |
+          echo "📦 Checking @wandermint/shared-schemas version..."
+          npm list @wandermint/shared-schemas || echo "Package not found in lock file"
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "✅ All contract tests passed!"
+          echo "✅ Backend is compatible with iOS and Admin"
+          echo "✅ No breaking schema changes detected"
