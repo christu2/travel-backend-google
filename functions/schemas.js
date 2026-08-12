@@ -16,6 +16,7 @@ const { schemas } = require('@wandermint/shared-schemas');
 const budgetSchema = schemas.budget;
 const travelStyleSchema = schemas.travelStyle;
 const commonTypesSchema = schemas.commonTypes;
+const recommendationSchema = schemas.recommendation;
 
 // Initialize AJV with custom options
 const ajv = new Ajv({
@@ -33,6 +34,7 @@ addFormats(ajv);
 ajv.addSchema(budgetSchema, 'budget.schema.json');
 ajv.addSchema(travelStyleSchema, 'travel-style.schema.json');
 ajv.addSchema(commonTypesSchema, 'common-types.schema.json');
+ajv.addSchema(recommendationSchema, 'recommendation.schema.json');
 
 /**
  * Trip Submission Schema
@@ -451,6 +453,7 @@ function validateDestinationDates(recommendation) {
 // Compile schemas
 const validateTripSubmission = ajv.compile(tripSubmissionSchema);
 const validateDestinationRecommendation = ajv.compile(destinationRecommendationSchema);
+const validateSharedRecommendation = ajv.compile(recommendationSchema);
 
 /**
  * Validate trip submission data with custom validations
@@ -481,7 +484,7 @@ function validateTripSubmissionData(data) {
 }
 
 /**
- * Validate recommendation data with custom validations
+ * Validate recommendation data with custom validations (legacy inline schema)
  * @param {Object} data - Recommendation data from admin dashboard
  * @returns {Object} { valid: boolean, errors: Array }
  */
@@ -508,9 +511,40 @@ function validateRecommendationData(data) {
     return { valid: true };
 }
 
+/**
+ * Validate recommendation data using shared schema (single source of truth)
+ * @param {Object} data - Recommendation data from admin dashboard
+ * @returns {Object} { valid: boolean, errors: Array }
+ */
+function validateRecommendationWithSharedSchema(data) {
+    const schemaValid = validateSharedRecommendation(data);
+
+    if (!schemaValid) {
+        return {
+            valid: false,
+            errors: validateSharedRecommendation.errors.map(err => ({
+                field: err.instancePath || err.params.missingProperty,
+                message: err.message,
+                value: err.data
+            }))
+        };
+    }
+
+    // Custom destination date validation
+    const dateValidation = validateDestinationDates(data);
+    if (!dateValidation.valid) {
+        return dateValidation;
+    }
+
+    return { valid: true };
+}
+
 module.exports = {
     validateTripSubmissionData,
     validateRecommendationData,
+    validateRecommendationWithSharedSchema,
     tripSubmissionSchema,
-    destinationRecommendationSchema
+    destinationRecommendationSchema,
+    recommendationSchema,
+    schemas
 };
