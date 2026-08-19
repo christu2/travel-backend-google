@@ -4,6 +4,7 @@ const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 const { validateTripSubmissionData, validateRecommendationData } = require("./schemas");
+const { generateTripDossierAndDraft, formatDossierEmailHtml } = require("./geminiService");
 
 // Initialize Firebase Admin
 initializeApp();
@@ -346,7 +347,7 @@ exports.processNewTrip = onDocumentCreated(
     {
         document: 'trips/{tripId}',
         region: "us-central1",
-        secrets: ["GMAIL_APP_PASSWORD", "SENDGRID_API_KEY"]
+        secrets: ["GMAIL_APP_PASSWORD", "SENDGRID_API_KEY", "GEMINI_API_KEY"]
     },
     async (event) => {
         const tripId = event.params.tripId;
@@ -355,21 +356,71 @@ exports.processNewTrip = onDocumentCreated(
         console.log(`Processing new trip: ${tripId}`);
         
         try {
-            // Update status to pending (waiting for manual planning)
-            await db.collection('trips').doc(tripId).update({
+            // Fetch user profile and points data
+            let pointsData = {
+                creditCard: {},
+                hotel: {},
+                airline: {},
+                totalPoints: 0
+            };
+            try {
+                const userPointsDoc = await db.collection('userPoints').doc(tripData.userId).get();
+                if (userPointsDoc.exists) {
+                    const pointsDoc = userPointsDoc.data();
+                    pointsData.creditCard = pointsDoc.creditCardPoints || {};
+                    pointsData.hotel = pointsDoc.hotelPoints || {};
+                    pointsData.airline = pointsDoc.airlinePoints || {};
+                    const creditCardTotal = Object.values(pointsData.creditCard).reduce((sum, p) => sum + (p || 0), 0);
+                    const hotelTotal = Object.values(pointsData.hotel).reduce((sum, p) => sum + (p || 0), 0);
+                    const airlineTotal = Object.values(pointsData.airline).reduce((sum, p) => sum + (p || 0), 0);
+                    pointsData.totalPoints = creditCardTotal + hotelTotal + airlineTotal;
+                }
+            } catch (pErr) {
+                console.warn('Could not fetch points for AI generation:', pErr);
+            }
+
+            // Attempt AI Preliminary Generation
+            let aiResult = null;
+            let aiDossierHtml = '';
+            const geminiApiKey = process.env.GEMINI_API_KEY;
+            if (geminiApiKey) {
+                try {
+                    console.log(`🤖 Generating AI preliminary itinerary & dossier for trip ${tripId}...`);
+                    aiResult = await generateTripDossierAndDraft(tripData, pointsData, geminiApiKey);
+                    if (aiResult) {
+                        aiDossierHtml = formatDossierEmailHtml(aiResult);
+                        console.log(`✅ AI preliminary draft & dossier generated for trip ${tripId}`);
+                    }
+                } catch (aiErr) {
+                    console.warn(`AI generation failed for trip ${tripId}:`, aiErr.message);
+                }
+            }
+
+            const updatePayload = {
                 status: 'pending',
                 updatedAt: FieldValue.serverTimestamp()
-            });
+            };
+
+            if (aiResult?.recommendation) {
+                updatePayload.destinationRecommendation = {
+                    id: tripId,
+                    ...aiResult.recommendation
+                };
+                updatePayload.isAiDraft = true;
+                updatePayload.aiDossier = aiResult.executiveDossier || null;
+            }
+
+            // Update status & draft in Firestore
+            await db.collection('trips').doc(tripId).update(updatePayload);
             
-            // Send notification email (if SendGrid is configured)
+            // Send notification email with AI dossier included
             try {
-                await sendNewTripNotification(tripId, tripData);
+                await sendNewTripNotification(tripId, tripData, pointsData, aiDossierHtml);
             } catch (emailError) {
                 console.warn('Failed to send email notification:', emailError);
-                // Don't fail the whole process if email fails
             }
             
-            console.log(`Trip ${tripId} is now pending manual planning via admin interface`);
+            console.log(`Trip ${tripId} processed successfully (AI draft: ${!!aiResult})`);
             
         } catch (error) {
             console.error(`Error processing trip ${tripId}:`, error);
@@ -383,14 +434,13 @@ exports.processNewTrip = onDocumentCreated(
     }
 );
 
-// Send email notification
-// Send email notification with user points
-async function sendNewTripNotification(tripId, tripData) {
+// Send email notification with user points and optional AI dossier
+async function sendNewTripNotification(tripId, tripData, existingPointsData = null, aiDossierHtml = '') {
     
-    // Fetch user profile and points data
+    // Fetch user profile and points data if not passed
     let userEmail = 'Not available';
     let userName = 'Not available';
-    let pointsData = {
+    let pointsData = existingPointsData || {
         creditCard: {},
         hotel: {},
         airline: {},
@@ -398,7 +448,6 @@ async function sendNewTripNotification(tripId, tripData) {
     };
     
     try {
-        // Get user profile from Firestore (for basic user info)
         const userProfileDoc = await db.collection('users').doc(tripData.userId).get();
         if (userProfileDoc.exists) {
             const userData = userProfileDoc.data();
@@ -406,24 +455,22 @@ async function sendNewTripNotification(tripId, tripData) {
             userName = userData.name || userData.displayName || 'Not available';
         }
         
-        // Get user points from separate collection
-        const userPointsDoc = await db.collection('userPoints').doc(tripData.userId).get();
-        if (userPointsDoc.exists) {
-            const pointsDoc = userPointsDoc.data();
-            pointsData.creditCard = pointsDoc.creditCardPoints || {};
-            pointsData.hotel = pointsDoc.hotelPoints || {};
-            pointsData.airline = pointsDoc.airlinePoints || {};
-            
-            // Calculate total points across all categories
-            const creditCardTotal = Object.values(pointsData.creditCard).reduce((sum, points) => sum + (points || 0), 0);
-            const hotelTotal = Object.values(pointsData.hotel).reduce((sum, points) => sum + (points || 0), 0);
-            const airlineTotal = Object.values(pointsData.airline).reduce((sum, points) => sum + (points || 0), 0);
-            pointsData.totalPoints = creditCardTotal + hotelTotal + airlineTotal;
+        if (!existingPointsData) {
+            const userPointsDoc = await db.collection('userPoints').doc(tripData.userId).get();
+            if (userPointsDoc.exists) {
+                const pointsDoc = userPointsDoc.data();
+                pointsData.creditCard = pointsDoc.creditCardPoints || {};
+                pointsData.hotel = pointsDoc.hotelPoints || {};
+                pointsData.airline = pointsDoc.airlinePoints || {};
+                
+                const creditCardTotal = Object.values(pointsData.creditCard).reduce((sum, points) => sum + (points || 0), 0);
+                const hotelTotal = Object.values(pointsData.hotel).reduce((sum, points) => sum + (points || 0), 0);
+                const airlineTotal = Object.values(pointsData.airline).reduce((sum, points) => sum + (points || 0), 0);
+                pointsData.totalPoints = creditCardTotal + hotelTotal + airlineTotal;
+            }
         }
-        
     } catch (error) {
         console.warn('Could not fetch user data:', error);
-        // Continue with email sending even if we can't get user data
     }
     
     // Helper function to format points breakdown
@@ -444,7 +491,7 @@ async function sendNewTripNotification(tripId, tripData) {
     const msg = {
         to: 'nchristus93@gmail.com',
         from: 'noreply@wandermint.io',
-        subject: `New Trip Request - ${tripData.destination} (${tripData.groupSize || 1} ${(tripData.groupSize || 1) === 1 ? 'traveler' : 'travelers'}) - ${pointsData.totalPoints.toLocaleString()} total pts`,
+        subject: `New Trip Request - ${tripData.destination || tripData.destinations?.[0] || 'Custom Trip'} (${tripData.groupSize || 1} ${(tripData.groupSize || 1) === 1 ? 'traveler' : 'travelers'}) - ${pointsData.totalPoints.toLocaleString()} total pts`,
         html: `
             <h2>🌍 New Trip Request</h2>
             
@@ -483,26 +530,27 @@ async function sendNewTripNotification(tripId, tripData) {
                 <p><strong>Interests:</strong> ${tripData.interests?.join(', ') || 'None specified'}</p>
                 ${tripData.specialRequests ? `<p><strong>Special Requests:</strong> ${tripData.specialRequests}</p>` : ''}
             </div>
+
+            ${aiDossierHtml}
             
             <div style="background: #f3e5f5; padding: 20px; border-radius: 8px; margin: 16px 0;">
                 <h3>📊 Submission Info</h3>
                 <p><strong>Submitted:</strong> ${new Date().toLocaleString()}</p>
-                <p><strong>Status:</strong> <span style="color: #ffc107; font-weight: bold;">Pending Manual Planning</span></p>
+                <p><strong>Status:</strong> <span style="color: #ffc107; font-weight: bold;">${aiDossierHtml ? 'AI Draft Pre-Populated (Ready for Review)' : 'Pending Manual Planning'}</span></p>
             </div>
             
             <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #ffc107;">
                 <h3>🎯 Next Steps</h3>
-                <p>This trip is ready for your personal touch! Use the admin dashboard to:</p>
+                <p>Use the admin dashboard to review and finalize this recommendation:</p>
                 <ul style="margin: 8px 0; padding-left: 20px;">
-                    <li>Create a custom itinerary</li>
-                    <li>Add personalized recommendations</li>
-                    <li>Optimize points and miles usage</li>
-                    <li>Mark as completed when ready</li>
+                    <li>Open <strong>Admin Dashboard</strong> to view/edit the pre-populated itinerary</li>
+                    <li>Refine hotels, flight times, and curated local activities</li>
+                    <li>Mark as completed and send directly to client's iOS app</li>
                 </ul>
             </div>
             
             <hr style="margin: 24px 0;">
-            <p style="color: #666; font-style: italic;">Ready to plan an amazing trip! 🎉</p>
+            <p style="color: #666; font-style: italic;">WanderMint AI Itinerary Engine 🎉</p>
         `
     };
 
@@ -1076,6 +1124,89 @@ exports.seatsAeroProxy = onRequest(
         } catch (error) {
             console.error('Seats.aero Proxy Error:', error);
             return res.status(500).json({ error: 'Seats.aero search failed', details: error.message });
+        }
+    }
+);
+
+// On-demand AI Trip Recommendation & Dossier Generation Endpoint
+exports.generateTripRecommendation = onRequest(
+    {
+        cors: true,
+        region: "us-central1",
+        secrets: ["GEMINI_API_KEY"]
+    },
+    async (req, res) => {
+        try {
+            if (req.method !== 'POST') {
+                return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+            }
+
+            const { tripId, tripData: customTripData, pointsData: customPointsData } = req.body || {};
+            const geminiApiKey = process.env.GEMINI_API_KEY;
+
+            if (!geminiApiKey) {
+                return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+            }
+
+            let tripData = customTripData;
+            let pointsData = customPointsData || { creditCard: {}, hotel: {}, airline: {}, totalPoints: 0 };
+
+            // If tripId provided, fetch trip and userPoints from Firestore
+            if (tripId && !tripData) {
+                const tripDoc = await db.collection('trips').doc(tripId).get();
+                if (!tripDoc.exists) {
+                    return res.status(404).json({ error: `Trip document ${tripId} not found.` });
+                }
+                tripData = tripDoc.data();
+
+                if (tripData.userId && !customPointsData) {
+                    try {
+                        const userPointsDoc = await db.collection('userPoints').doc(tripData.userId).get();
+                        if (userPointsDoc.exists) {
+                            const pData = userPointsDoc.data();
+                            pointsData.creditCard = pData.creditCardPoints || {};
+                            pointsData.hotel = pData.hotelPoints || {};
+                            pointsData.airline = pData.airlinePoints || {};
+                            const creditCardTotal = Object.values(pointsData.creditCard).reduce((sum, p) => sum + (p || 0), 0);
+                            const hotelTotal = Object.values(pointsData.hotel).reduce((sum, p) => sum + (p || 0), 0);
+                            const airlineTotal = Object.values(pointsData.airline).reduce((sum, p) => sum + (p || 0), 0);
+                            pointsData.totalPoints = creditCardTotal + hotelTotal + airlineTotal;
+                        }
+                    } catch (pErr) {
+                        console.warn('Could not fetch user points for generateTripRecommendation:', pErr);
+                    }
+                }
+            }
+
+            if (!tripData) {
+                return res.status(400).json({ error: 'Either tripId or tripData must be provided.' });
+            }
+
+            console.log(`🤖 On-demand AI itinerary generation requested for: ${tripData.destination || tripData.destinations?.[0]}`);
+            const aiResult = await generateTripDossierAndDraft(tripData, pointsData, geminiApiKey);
+
+            // If tripId was passed, save the draft recommendation back to Firestore
+            if (tripId && aiResult?.recommendation) {
+                await db.collection('trips').doc(tripId).update({
+                    destinationRecommendation: {
+                        id: tripId,
+                        ...aiResult.recommendation
+                    },
+                    isAiDraft: true,
+                    aiDossier: aiResult.executiveDossier || null,
+                    updatedAt: FieldValue.serverTimestamp()
+                });
+            }
+
+            return res.json({
+                success: true,
+                dossier: aiResult.executiveDossier,
+                recommendation: aiResult.recommendation
+            });
+
+        } catch (error) {
+            console.error('generateTripRecommendation error:', error);
+            return res.status(500).json({ error: 'AI generation failed', details: error.message });
         }
     }
 );
