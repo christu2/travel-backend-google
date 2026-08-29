@@ -221,6 +221,8 @@ exports.submitTrip = onRequest(
                 budget: budget,
                 travelStyle: travelStyle,
                 groupSize: groupSize,
+                petFriendly: Boolean(data.petFriendly || data.isPetFriendly || false),
+                optInEmailNotifications: Boolean(data.optInEmailNotifications ?? true),
                 specialRequests: specialRequests,
                 interests: interests,
                 flightClass: data.flightClass || null,
@@ -527,6 +529,7 @@ async function sendNewTripNotification(tripId, tripData, existingPointsData = nu
                 <p><strong>Budget:</strong> ${tripData.budget || 'Not specified'}</p>
                 <p><strong>Travel Style:</strong> ${tripData.travelStyle || 'Not specified'}</p>
                 <p><strong>Group Size:</strong> ${tripData.groupSize || 1} ${(tripData.groupSize || 1) === 1 ? 'person' : 'people'}</p>
+                <p><strong>Pet-Friendly:</strong> ${tripData.petFriendly ? '🐾 Yes (Requires Pet-Friendly Stays & Activities)' : 'No'}</p>
                 <p><strong>Interests:</strong> ${tripData.interests?.join(', ') || 'None specified'}</p>
                 ${tripData.specialRequests ? `<p><strong>Special Requests:</strong> ${tripData.specialRequests}</p>` : ''}
             </div>
@@ -576,155 +579,166 @@ async function sendDetailedItineraryNotification(tripId, tripData) {
         console.warn('Could not fetch user data for itinerary email:', error);
     }
     
-    const destinations = tripData.destinations?.join(', ') || tripData.destination || 'Your Destination';
-    const recommendation = tripData.recommendation;
-    const itinerary = recommendation?.itinerary;
+    const destRec = tripData.destinationRecommendation || (tripData.recommendation?.destinations ? tripData.recommendation : null);
+    const legacyRec = tripData.recommendation;
+    const legacyItinerary = legacyRec?.itinerary;
+    const destinationsTitle = tripData.destinations?.join(', ') || tripData.destination || 'Your Destination';
+    const overviewText = destRec?.tripOverview || legacyRec?.overview || 'Your custom travel itinerary has been crafted and is ready for your trip.';
     
-    // Build flight information HTML
-    let flightHtml = '';
-    if (itinerary?.flights) {
-        const flights = itinerary.flights;
-        flightHtml = `
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; margin: 20px 0;">
-                <h3 style="color: white; margin-top: 0;">✈️ Your Flights</h3>
-                ${flights.outbound ? `
-                    <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 8px; margin: 10px 0;">
-                        <h4 style="color: white; margin: 0 0 10px 0;">Outbound: ${flights.outbound.departure?.airportCode || ''} → ${flights.outbound.arrival?.airportCode || ''}</h4>
-                        <p style="color: white; margin: 5px 0;"><strong>${flights.outbound.airline || ''} ${flights.outbound.flightNumber || ''}</strong></p>
-                        <p style="color: white; margin: 5px 0;">${flights.outbound.departure?.date || ''} at ${flights.outbound.departure?.time || ''} → ${flights.outbound.arrival?.date || ''} at ${flights.outbound.arrival?.time || ''}</p>
-                        <p style="color: white; margin: 5px 0;">Duration: ${flights.outbound.duration || 'N/A'} | Cost: $${flights.outbound.cost || 0}</p>
+    let contentHtml = '';
+    
+    if (destRec && Array.isArray(destRec.destinations) && destRec.destinations.length > 0) {
+        // Modern Destination-Based Itinerary formatting
+        const destinationsHtml = destRec.destinations.map((dest, dIdx) => {
+            const hotelsHtml = (dest.accommodationOptions || []).map(acc => {
+                const h = acc.hotel || {};
+                const mapQuery = encodeURIComponent(`${h.name} ${h.location || dest.cityName}`);
+                return `
+                    <div style="background: white; border-radius: 8px; padding: 14px; margin: 10px 0; border: 1px solid #e2e8f0; border-left: 4px solid #3b82f6;">
+                        <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;">
+                            <strong style="color: #1e3a8a; font-size: 16px;">${h.name || 'Hotel'}</strong>
+                            <span style="color: #059669; font-weight: bold;">$${h.pricePerNight || 0}/night ${h.pointsPerNight ? `· ${h.pointsPerNight.toLocaleString()} pts` : ''}</span>
+                        </div>
+                        <p style="color: #4b5563; margin: 4px 0 6px 0; font-size: 13px;">
+                            ⭐ ${h.rating || 4.5}/5 · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${h.location || dest.cityName} 🗺️</a>
+                        </p>
+                        ${h.detailedDescription ? `<p style="color: #374151; margin: 6px 0; font-size: 14px; line-height: 1.4;">${h.detailedDescription}</p>` : ''}
+                        <div style="margin-top: 8px; font-size: 13px;">
+                            ${h.bookingUrl ? `<a href="${h.bookingUrl}" style="background: #2563eb; color: white; padding: 4px 10px; border-radius: 4px; text-decoration: none; display: inline-block; margin-right: 8px; font-size: 12px;" target="_blank">Book Hotel</a>` : ''}
+                            ${h.tripadvisorUrl ? `<a href="${h.tripadvisorUrl}" style="color: #0284c7; text-decoration: none; margin-right: 8px;" target="_blank">TripAdvisor Reviews</a>` : ''}
+                        </div>
                     </div>
-                ` : ''}
-                ${flights.return ? `
-                    <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 8px; margin: 10px 0;">
-                        <h4 style="color: white; margin: 0 0 10px 0;">Return: ${flights.return.departure?.airportCode || ''} → ${flights.return.arrival?.airportCode || ''}</h4>
-                        <p style="color: white; margin: 5px 0;"><strong>${flights.return.airline || ''} ${flights.return.flightNumber || ''}</strong></p>
-                        <p style="color: white; margin: 5px 0;">${flights.return.departure?.date || ''} at ${flights.return.departure?.time || ''} → ${flights.return.arrival?.date || ''} at ${flights.return.arrival?.time || ''}</p>
-                        <p style="color: white; margin: 5px 0;">Duration: ${flights.return.duration || 'N/A'} | Cost: $${flights.return.cost || 0}</p>
+                `;
+            }).join('');
+
+            const activitiesHtml = (dest.recommendedActivities || []).map(act => {
+                const mapQuery = encodeURIComponent(`${act.name} ${act.location || dest.cityName}`);
+                return `
+                    <div style="background: white; border-radius: 6px; padding: 12px; margin: 8px 0; border: 1px solid #e2e8f0;">
+                        <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;">
+                            <strong style="color: #1f2937; font-size: 15px;">${act.name}</strong>
+                            ${act.estimatedCost?.cashAmount > 0 || typeof act.estimatedCost === 'number' ? `<span style="color: #059669; font-weight: 600; font-size: 13px;">$${act.estimatedCost?.cashAmount || act.estimatedCost}</span>` : '<span style="color: #6b7280; font-size: 12px;">Free / Included</span>'}
+                        </div>
+                        <p style="color: #6b7280; margin: 2px 0 6px 0; font-size: 12px;">
+                            🏷️ ${act.category || 'Sightseeing'} ${act.estimatedDuration ? `· ⏱️ ${act.estimatedDuration}` : ''} · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${act.location || dest.cityName} 🗺️</a>
+                        </p>
+                        <p style="color: #4b5563; margin: 4px 0; font-size: 13px;">${act.description || ''}</p>
+                        <div style="margin-top: 6px; font-size: 12px;">
+                            ${act.website || act.bookingUrl ? `<a href="${act.website || act.bookingUrl}" style="color: #2563eb; text-decoration: none; margin-right: 10px;" target="_blank">🌐 Official Website</a>` : ''}
+                            ${act.tripadvisorUrl ? `<a href="${act.tripadvisorUrl}" style="color: #0284c7; text-decoration: none; margin-right: 10px;" target="_blank">🦉 TripAdvisor</a>` : ''}
+                        </div>
                     </div>
-                ` : ''}
-                <div style="background: rgba(255,255,255,0.2); padding: 10px; border-radius: 6px; margin-top: 15px;">
-                    <p style="color: white; margin: 0; font-size: 16px;"><strong>Total Flight Cost: $${flights.totalFlightCost || 0}</strong></p>
-                    ${flights.bookingDeadline ? `<p style="color: #ffd700; margin: 5px 0 0 0;">🕒 Book by: ${flights.bookingDeadline}</p>` : ''}
+                `;
+            }).join('');
+
+            const restaurantsHtml = (dest.recommendedRestaurants || []).map(rest => {
+                const mapQuery = encodeURIComponent(`${rest.name} ${rest.location || dest.cityName}`);
+                const yelpSearchUrl = rest.yelpUrl || `https://www.yelp.com/search?find_desc=${encodeURIComponent(rest.name)}&find_loc=${encodeURIComponent(rest.location || dest.cityName)}`;
+                return `
+                    <div style="background: white; border-radius: 6px; padding: 12px; margin: 8px 0; border: 1px solid #e2e8f0;">
+                        <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;">
+                            <strong style="color: #1f2937; font-size: 15px;">${rest.name}</strong>
+                            <span style="color: #d97706; font-weight: bold; font-size: 13px;">${rest.priceRange || '$$'}</span>
+                        </div>
+                        <p style="color: #6b7280; margin: 2px 0 6px 0; font-size: 12px;">
+                            🍴 ${rest.cuisine || 'Local Cuisine'} · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${rest.location || dest.cityName} 🗺️</a>
+                        </p>
+                        <p style="color: #4b5563; margin: 4px 0; font-size: 13px;">${rest.description || ''}</p>
+                        <div style="margin-top: 6px; font-size: 12px;">
+                            <a href="${yelpSearchUrl}" style="color: #dc2626; text-decoration: none; margin-right: 10px;" target="_blank">🔴 Yelp Reviews</a>
+                            ${rest.website ? `<a href="${rest.website}" style="color: #2563eb; text-decoration: none; margin-right: 10px;" target="_blank">🌐 Website</a>` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            return `
+                <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; padding: 18px; margin: 18px 0;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 12px;">
+                        <h3 style="color: #1e3a8a; margin: 0; font-size: 20px;">📍 ${dest.cityName}</h3>
+                        <span style="background: #e0e7ff; color: #3730a3; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;">${dest.numberOfNights || 1} ${(dest.numberOfNights || 1) === 1 ? 'Night' : 'Nights'} (${dest.arrivalDate || ''} - ${dest.departureDate || ''})</span>
+                    </div>
+                    ${dest.overview ? `<p style="color: #475569; font-style: italic; font-size: 14px; margin-bottom: 16px;">${dest.overview}</p>` : ''}
+                    
+                    ${hotelsHtml ? `
+                        <div style="margin: 14px 0;">
+                            <h4 style="color: #0369a1; margin: 0 0 8px 0; font-size: 15px;">🏨 Recommended Stays</h4>
+                            ${hotelsHtml}
+                        </div>
+                    ` : ''}
+
+                    ${activitiesHtml ? `
+                        <div style="margin: 14px 0;">
+                            <h4 style="color: #047857; margin: 0 0 8px 0; font-size: 15px;">🎯 Curated Activities & Sights</h4>
+                            ${activitiesHtml}
+                        </div>
+                    ` : ''}
+
+                    ${restaurantsHtml ? `
+                        <div style="margin: 14px 0;">
+                            <h4 style="color: #b45309; margin: 0 0 8px 0; font-size: 15px;">🍽️ Recommended Dining & Eateries</h4>
+                            ${restaurantsHtml}
+                        </div>
+                    ` : ''}
                 </div>
-            </div>
-        `;
-    }
-    
-    // Build daily itinerary HTML
-    let dailyHtml = '';
-    if (itinerary?.dailyPlans && itinerary.dailyPlans.length > 0) {
-        dailyHtml = `
-            <div style="margin: 20px 0;">
-                <h3 style="color: #2563eb;">📅 Your Daily Itinerary</h3>
-                ${itinerary.dailyPlans.map(day => `
-                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 12px 0;">
-                        <h4 style="color: #1e40af; margin: 0 0 12px 0;">Day ${day.dayNumber}: ${day.title || ''}</h4>
-                        ${day.date ? `<p style="color: #64748b; margin: 0 0 12px 0; font-weight: 500;">${day.date}</p>` : ''}
-                        ${day.activities && day.activities.length > 0 ? day.activities.map(activity => `
-                            <div style="background: white; border-radius: 6px; padding: 12px; margin: 8px 0; border-left: 4px solid #3b82f6;">
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                    <strong style="color: #1e40af;">${activity.time || ''} - ${activity.title || ''}</strong>
-                                    ${activity.cost > 0 ? `<span style="color: #059669; font-weight: bold;">$${activity.cost}</span>` : ''}
-                                </div>
-                                <p style="color: #4b5563; margin: 0; font-size: 14px;">${activity.description || ''}</p>
-                                ${activity.duration ? `<p style="color: #6b7280; margin: 4px 0 0 0; font-size: 12px;">Duration: ${activity.duration}</p>` : ''}
-                                ${activity.bookingRequired ? `<p style="color: #d97706; margin: 4px 0 0 0; font-size: 12px; font-weight: 500;">⚠️ Advance booking required</p>` : ''}
-                            </div>
-                        `).join('') : ''}
-                        ${day.estimatedCost > 0 ? `<p style="margin: 12px 0 0 0; padding: 8px; background: #ecfdf5; border-radius: 4px; color: #059669; font-weight: bold;">Day Total: $${day.estimatedCost}</p>` : ''}
-                    </div>
-                `).join('')}
-            </div>
-        `;
-    }
-    
-    // Build accommodations HTML
-    let accommodationsHtml = '';
-    if (itinerary?.accommodations && itinerary.accommodations.length > 0) {
-        accommodationsHtml = `
-            <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                <h3 style="color: #0369a1; margin-top: 0;">🏨 Your Accommodations</h3>
-                ${itinerary.accommodations.map(acc => `
-                    <div style="background: white; border-radius: 6px; padding: 15px; margin: 10px 0;">
-                        <h4 style="color: #1e40af; margin: 0 0 8px 0;">${acc.name || 'Hotel'}</h4>
-                        <p style="margin: 4px 0; color: #4b5563;"><strong>Check-in:</strong> ${acc.checkIn || 'TBD'} | <strong>Check-out:</strong> ${acc.checkOut || 'TBD'}</p>
-                        <p style="margin: 4px 0; color: #4b5563;"><strong>Room:</strong> ${acc.roomType || 'Standard'} | <strong>Nights:</strong> ${acc.nights || 1}</p>
-                        <p style="margin: 4px 0; color: #059669; font-weight: bold;">$${acc.cost || 0}/night</p>
-                        ${acc.bookingInstructions ? `<p style="margin: 8px 0 0 0; padding: 8px; background: #fef3c7; border-radius: 4px; font-size: 14px;">${acc.bookingInstructions}</p>` : ''}
-                    </div>
-                `).join('')}
-            </div>
-        `;
-    }
-    
-    // Build cost summary
-    let costHtml = '';
-    if (itinerary?.totalCost && itinerary.totalCost.totalEstimate > 0) {
-        const cost = itinerary.totalCost;
-        costHtml = `
-            <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                <h3 style="color: #166534; margin-top: 0;">💰 Cost Breakdown</h3>
-                <div style="display: grid; gap: 8px;">
-                    ${cost.flights > 0 ? `<div style="display: flex; justify-content: space-between;"><span>Flights:</span><span>$${cost.flights}</span></div>` : ''}
-                    ${cost.accommodation > 0 ? `<div style="display: flex; justify-content: space-between;"><span>Accommodation:</span><span>$${cost.accommodation}</span></div>` : ''}
-                    ${cost.activities > 0 ? `<div style="display: flex; justify-content: space-between;"><span>Activities:</span><span>$${cost.activities}</span></div>` : ''}
-                    ${cost.food > 0 ? `<div style="display: flex; justify-content: space-between;"><span>Food:</span><span>$${cost.food}</span></div>` : ''}
-                    ${cost.localTransport > 0 ? `<div style="display: flex; justify-content: space-between;"><span>Local Transport:</span><span>$${cost.localTransport}</span></div>` : ''}
-                    ${cost.miscellaneous > 0 ? `<div style="display: flex; justify-content: space-between;"><span>Miscellaneous:</span><span>$${cost.miscellaneous}</span></div>` : ''}
+            `;
+        }).join('');
+
+        contentHtml = destinationsHtml;
+    } else {
+        // Fallback for legacy format
+        let flightHtml = '';
+        if (legacyItinerary?.flights) {
+            const flights = legacyItinerary.flights;
+            flightHtml = `
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; margin: 20px 0;">
+                    <h3 style="color: white; margin-top: 0;">✈️ Your Flights</h3>
+                    ${flights.outbound ? `
+                        <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 8px; margin: 10px 0;">
+                            <h4 style="color: white; margin: 0 0 10px 0;">Outbound: ${flights.outbound.departure?.airportCode || ''} → ${flights.outbound.arrival?.airportCode || ''}</h4>
+                            <p style="color: white; margin: 5px 0;"><strong>${flights.outbound.airline || ''} ${flights.outbound.flightNumber || ''}</strong></p>
+                        </div>
+                    ` : ''}
                 </div>
-                <hr style="margin: 15px 0; border: none; border-top: 2px solid #16a34a;">
-                <div style="display: flex; justify-content: space-between; font-size: 18px; font-weight: bold; color: #166534;">
-                    <span>Total Estimated Cost:</span>
-                    <span>$${cost.totalEstimate} ${cost.currency || 'USD'}</span>
-                </div>
-            </div>
-        `;
+            `;
+        }
+        contentHtml = flightHtml;
     }
     
     const msg = {
         to: userEmail,
         from: 'noreply@wandermint.io',
-        subject: `🎉 Your Detailed Itinerary for ${destinations} is Ready!`,
+        subject: `🎉 Your Personalized Itinerary for ${destinationsTitle} is Ready!`,
         html: `
-            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; line-height: 1.6;">
-                <div style="text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 12px; margin-bottom: 30px;">
-                    <h1 style="margin: 0; font-size: 28px;">🎉 Your Detailed Itinerary is Ready!</h1>
-                    <p style="margin: 10px 0 0 0; font-size: 18px; opacity: 0.9;">Get ready for an amazing trip to ${destinations}</p>
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #1f2937;">
+                <div style="text-align: center; background: linear-gradient(135deg, #0ea5e9 0%, #3b82f6 100%); color: white; padding: 32px 20px; border-radius: 12px; margin-bottom: 24px;">
+                    <h1 style="margin: 0; font-size: 26px; font-weight: 700;">🎉 Your Itinerary is Ready!</h1>
+                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">Personalized travel recommendations for ${destinationsTitle}</p>
                 </div>
                 
-                <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-                    <h2 style="color: #1e40af; margin-top: 0;">Hi ${userName}! 👋</h2>
-                    <p>Your personalized travel itinerary is complete and ready for booking! This comprehensive plan includes everything you need for an incredible trip.</p>
-                    ${recommendation?.overview ? `<p style="font-style: italic; color: #4b5563;">"${recommendation.overview}"</p>` : ''}
+                <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e2e8f0;">
+                    <h2 style="color: #1e40af; margin-top: 0; font-size: 18px;">Hi ${userName}! 👋</h2>
+                    <p style="margin-bottom: 8px;">Your personalized WanderMint travel itinerary is complete! We've handpicked accommodations, curated sights, and mapped out top dining spots for your trip.</p>
+                    ${overviewText ? `<p style="font-style: italic; color: #475569; background: white; padding: 12px; border-radius: 6px; border-left: 3px solid #3b82f6; margin-top: 10px;">"${overviewText}"</p>` : ''}
                 </div>
                 
-                ${flightHtml}
-                ${dailyHtml}
-                ${accommodationsHtml}
-                ${costHtml}
+                ${contentHtml}
                 
-                <div style="background: #fef3c7; border: 1px solid #fbbf24; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                    <h3 style="color: #92400e; margin-top: 0;">📋 Next Steps</h3>
-                    <ol style="color: #92400e; margin: 0; padding-left: 20px;">
-                        <li><strong>Review</strong> your complete itinerary in the app</li>
-                        <li><strong>Book flights</strong> as soon as possible for best availability</li>
-                        <li><strong>Reserve accommodations</strong> and activities that require advance booking</li>
-                        <li><strong>Check</strong> passport/visa requirements if traveling internationally</li>
-                        <li><strong>Consider</strong> travel insurance for peace of mind</li>
-                    </ol>
+                <div style="background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 20px; margin: 20px 0; text-align: center;">
+                    <h3 style="color: #065f46; margin-top: 0;">📱 View Interactive Itinerary in App</h3>
+                    <p style="color: #047857; margin-bottom: 16px; font-size: 14px;">Open WanderMint on your iPhone to access 1-tap navigation, request real-time modifications, and manage your bookings.</p>
                 </div>
                 
-                <div style="text-align: center; padding: 20px; background: #f1f5f9; border-radius: 8px; margin-top: 30px;">
-                    <p style="margin: 0; color: #64748b;">Questions about your itinerary? Reply to this email!</p>
-                    <p style="margin: 10px 0 0 0; color: #64748b; font-size: 14px;">Happy travels! ✈️🌟</p>
+                <div style="text-align: center; padding: 16px; color: #64748b; font-size: 13px;">
+                    <p style="margin: 0;">Need to make adjustments? Use the "Request Changes" tab directly in WanderMint or reply to this email.</p>
+                    <p style="margin: 6px 0 0 0;">Happy travels! ✈️🌍</p>
                 </div>
             </div>
         `
     };
 
     await sendEmail(msg);
-    console.log(`Detailed itinerary email sent for trip: ${tripId} (User: ${userName})`);
+    console.log(`Detailed itinerary email sent for trip: ${tripId} (User: ${userName}, Email: ${userEmail})`);
 }
 
 // Handle trip status updates
@@ -744,12 +758,12 @@ exports.onTripStatusUpdate = onDocumentUpdated(
             console.log(`Trip completed: ${tripId}`);
             
             try {
-                // Check if this is a detailed itinerary (has itinerary data)
-                if (afterData.recommendation?.itinerary) {
+                // Check if this trip has destinationRecommendation or legacy recommendation
+                if (afterData.destinationRecommendation || afterData.recommendation) {
                     await sendDetailedItineraryNotification(tripId, afterData);
                     console.log(`Sent detailed itinerary notification for trip ${tripId}`);
                 } else {
-                    console.log(`Trip ${tripId} completed but no detailed itinerary found`);
+                    console.log(`Trip ${tripId} completed but no recommendation data found`);
                 }
             } catch (error) {
                 console.error(`Failed to send detailed itinerary notification for trip ${tripId}:`, error);

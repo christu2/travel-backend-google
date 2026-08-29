@@ -119,6 +119,16 @@ const tripSubmissionSchema = {
             enum: ['Economy', 'Premium Economy', 'Business', 'First Class'],
             description: 'Preferred flight class'
         },
+        petFriendly: {
+            type: 'boolean',
+            default: false,
+            description: 'Whether pet-friendly accommodations and activities are required'
+        },
+        optInEmailNotifications: {
+            type: 'boolean',
+            default: true,
+            description: 'Whether the user wants to receive email notifications when the trip is ready'
+        },
 
         // Legacy fields for backward compatibility
         destination: {
@@ -241,6 +251,17 @@ const destinationRecommendationSchema = {
                                             type: 'string',
                                             maxLength: 5000
                                         },
+                                        photoUrl: {
+                                            type: 'string',
+                                            format: 'uri',
+                                            maxLength: 2000
+                                        },
+                                        photos: {
+                                            type: 'array',
+                                            items: {
+                                                type: 'string'
+                                            }
+                                        },
                                         tripadvisorId: {
                                             type: 'string',
                                             maxLength: 50
@@ -290,6 +311,21 @@ const destinationRecommendationSchema = {
                                 category: {
                                     type: 'string',
                                     maxLength: 50
+                                },
+                                website: {
+                                    type: 'string',
+                                    format: 'uri',
+                                    maxLength: 2000
+                                },
+                                tripadvisorUrl: {
+                                    type: 'string',
+                                    format: 'uri',
+                                    maxLength: 2000
+                                },
+                                bookingUrl: {
+                                    type: 'string',
+                                    format: 'uri',
+                                    maxLength: 2000
                                 }
                             }
                         }
@@ -324,6 +360,16 @@ const destinationRecommendationSchema = {
                                 },
                                 description: {
                                     type: 'string',
+                                    maxLength: 2000
+                                },
+                                yelpUrl: {
+                                    type: 'string',
+                                    format: 'uri',
+                                    maxLength: 2000
+                                },
+                                website: {
+                                    type: 'string',
+                                    format: 'uri',
                                     maxLength: 2000
                                 }
                             }
