@@ -4,7 +4,7 @@ const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 const { validateTripSubmissionData, validateRecommendationData } = require("./schemas");
-const { generateTripDossierAndDraft, formatDossierEmailHtml } = require("./geminiService");
+const { generateTripDossierAndDraft, formatDossierEmailHtml, handleCopilotChat } = require("./geminiService");
 
 // Initialize Firebase Admin
 initializeApp();
@@ -329,9 +329,10 @@ exports.updateTripRecommendation = onRequest(
             await db.collection('trips').doc(tripId).update({
                 status: 'completed',
                 recommendation: recommendation,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                destinationRecommendation: recommendation,
+                updatedAt: FieldValue.serverTimestamp(),
                 completedBy: decodedToken.uid,
-                completedAt: admin.firestore.FieldValue.serverTimestamp()
+                completedAt: FieldValue.serverTimestamp()
             });
             
             console.log(`Trip ${tripId} completed by admin`);
@@ -344,12 +345,12 @@ exports.updateTripRecommendation = onRequest(
     }
 );
 
-// Process new trip submissions
+// Process new trip submissions (Clean blank canvas waiting for admin dictation in the Copilot)
 exports.processNewTrip = onDocumentCreated(
     {
         document: 'trips/{tripId}',
         region: "us-central1",
-        secrets: ["GMAIL_APP_PASSWORD", "SENDGRID_API_KEY", "GEMINI_API_KEY"]
+        secrets: ["GMAIL_APP_PASSWORD", "SENDGRID_API_KEY"]
     },
     async (event) => {
         const tripId = event.params.tripId;
@@ -378,51 +379,23 @@ exports.processNewTrip = onDocumentCreated(
                     pointsData.totalPoints = creditCardTotal + hotelTotal + airlineTotal;
                 }
             } catch (pErr) {
-                console.warn('Could not fetch points for AI generation:', pErr);
+                console.warn('Could not fetch points for trip notification:', pErr);
             }
 
-            // Attempt AI Preliminary Generation
-            let aiResult = null;
-            let aiDossierHtml = '';
-            const geminiApiKey = process.env.GEMINI_API_KEY;
-            if (geminiApiKey) {
-                try {
-                    console.log(`🤖 Generating AI preliminary itinerary & dossier for trip ${tripId}...`);
-                    aiResult = await generateTripDossierAndDraft(tripData, pointsData, geminiApiKey);
-                    if (aiResult) {
-                        aiDossierHtml = formatDossierEmailHtml(aiResult);
-                        console.log(`✅ AI preliminary draft & dossier generated for trip ${tripId}`);
-                    }
-                } catch (aiErr) {
-                    console.warn(`AI generation failed for trip ${tripId}:`, aiErr.message);
-                }
-            }
-
-            const updatePayload = {
+            // Keep new trip as a clean blank canvas waiting for consultant dictation in the AI Copilot
+            await db.collection('trips').doc(tripId).update({
                 status: 'pending',
                 updatedAt: FieldValue.serverTimestamp()
-            };
-
-            if (aiResult?.recommendation) {
-                updatePayload.destinationRecommendation = {
-                    id: tripId,
-                    ...aiResult.recommendation
-                };
-                updatePayload.isAiDraft = true;
-                updatePayload.aiDossier = aiResult.executiveDossier || null;
-            }
-
-            // Update status & draft in Firestore
-            await db.collection('trips').doc(tripId).update(updatePayload);
+            });
             
-            // Send notification email with AI dossier included
+            // Send notification email with client points & miles breakdown
             try {
-                await sendNewTripNotification(tripId, tripData, pointsData, aiDossierHtml);
+                await sendNewTripNotification(tripId, tripData, pointsData, '');
             } catch (emailError) {
                 console.warn('Failed to send email notification:', emailError);
             }
             
-            console.log(`Trip ${tripId} processed successfully (AI draft: ${!!aiResult})`);
+            console.log(`Trip ${tripId} processed successfully (ready for Copilot dictation)`);
             
         } catch (error) {
             console.error(`Error processing trip ${tripId}:`, error);
@@ -753,20 +726,24 @@ exports.onTripStatusUpdate = onDocumentUpdated(
         const beforeData = event.data.before.data();
         const afterData = event.data.after.data();
         
-        // Send detailed itinerary notification when trip is completed
+        // Send detailed itinerary notification when trip is completed (respecting user opt-in)
         if (beforeData.status !== 'completed' && afterData.status === 'completed') {
             console.log(`Trip completed: ${tripId}`);
             
-            try {
-                // Check if this trip has destinationRecommendation or legacy recommendation
-                if (afterData.destinationRecommendation || afterData.recommendation) {
-                    await sendDetailedItineraryNotification(tripId, afterData);
-                    console.log(`Sent detailed itinerary notification for trip ${tripId}`);
-                } else {
-                    console.log(`Trip ${tripId} completed but no recommendation data found`);
+            if (afterData.optInEmailNotifications === false) {
+                console.log(`Skipping itinerary completion email for trip ${tripId}: user opted out of email notifications.`);
+            } else {
+                try {
+                    // Check if this trip has destinationRecommendation or legacy recommendation
+                    if (afterData.destinationRecommendation || afterData.recommendation) {
+                        await sendDetailedItineraryNotification(tripId, afterData);
+                        console.log(`Sent detailed itinerary notification for trip ${tripId}`);
+                    } else {
+                        console.log(`Trip ${tripId} completed but no recommendation data found`);
+                    }
+                } catch (error) {
+                    console.error(`Failed to send detailed itinerary notification for trip ${tripId}:`, error);
                 }
-            } catch (error) {
-                console.error(`Failed to send detailed itinerary notification for trip ${tripId}:`, error);
             }
         }
         
@@ -974,16 +951,28 @@ exports.googlePlacesProxy = onRequest(
                     return res.status(400).json({ success: false, error: data.error_message || data.status });
                 }
 
-                const results = (data.results || []).slice(0, 10).map(p => ({
-                    placeId: p.place_id,
-                    name: p.name,
-                    address: p.formatted_address,
-                    rating: p.rating,
-                    userRatingsTotal: p.user_ratings_total,
-                    photoReference: p.photos?.[0]?.photo_reference
-                }));
+                const results = (data.results || []).slice(0, 10).map(p => {
+                    const photoRef = p.photos?.[0]?.photo_reference;
+                    const photoUrl = photoRef
+                        ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${photoRef}&key=${apiKey}`
+                        : '';
+                    return {
+                        id: p.place_id,
+                        placeId: p.place_id,
+                        name: p.name,
+                        address: p.formatted_address,
+                        location: p.formatted_address,
+                        rating: p.rating,
+                        userRatingsTotal: p.user_ratings_total,
+                        numReviews: p.user_ratings_total,
+                        photoReference: photoRef,
+                        photoUrl,
+                        bookingUrl: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`,
+                        googleMapsUrl: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`
+                    };
+                });
 
-                return res.json({ success: true, results });
+                return res.json({ status: 'success', data: results, success: true, results });
             } else {
                 return res.status(400).json({ error: 'Missing required parameter: query or placeId' });
             }
@@ -995,149 +984,52 @@ exports.googlePlacesProxy = onRequest(
 );
 
 /**
- * SerpAPI Google Flights Proxy
- * Proxies live flight search requests securely.
+ * AI Dictation & Consulting Copilot Chat Endpoint
+ * Powers voice dictation & natural language recommendation population in travelAdmin.
  */
-exports.serpapiFlightsProxy = onRequest(
+exports.copilotChat = onRequest(
     {
+        cors: true,
         region: "us-central1",
-        memory: "256MiB",
-        timeoutSeconds: 30,
-        cors: true
+        memory: "512MiB",
+        timeoutSeconds: 60,
+        secrets: ["GEMINI_API_KEY"]
     },
     async (req, res) => {
         res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
         res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
         if (req.method === 'OPTIONS') {
-            res.status(200).send('');
-            return;
+            return res.status(200).send('');
+        }
+
+        if (req.method !== 'POST') {
+            return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
         }
 
         try {
-            const serpApiKey = process.env.SERPAPI_KEY;
-            const { departure_id, arrival_id, outbound_date, currency = 'USD' } = req.query;
-
-            if (!departure_id || !arrival_id || !outbound_date) {
-                return res.status(400).json({ error: 'Missing required parameters: departure_id, arrival_id, outbound_date' });
+            const { message, history = [], tripContext = {}, currentRecommendation = null, apiKey } = req.body || {};
+            if (!message) {
+                return res.status(400).json({ success: false, error: 'Message is required' });
             }
 
-            if (!serpApiKey) {
-                return res.status(500).json({ error: 'SERPAPI_KEY is not configured in server environment' });
-            }
-
-            const apiUrl = new URL('https://serpapi.com/search.json');
-            apiUrl.searchParams.set('engine', 'google_flights');
-            apiUrl.searchParams.set('departure_id', departure_id);
-            apiUrl.searchParams.set('arrival_id', arrival_id);
-            apiUrl.searchParams.set('outbound_date', outbound_date);
-            apiUrl.searchParams.set('type', '2'); // One-way
-            apiUrl.searchParams.set('currency', currency);
-            apiUrl.searchParams.set('hl', 'en');
-            apiUrl.searchParams.set('api_key', serpApiKey);
-
-            const response = await fetch(apiUrl.toString());
-            if (!response.ok) {
-                const errorText = await response.text();
-                return res.status(response.status).json({ error: 'SerpAPI request failed', details: errorText });
-            }
-
-            const data = await response.json();
-            return res.json({
-                success: true,
-                search_parameters: data.search_parameters,
-                best_flights: data.best_flights || [],
-                other_flights: data.other_flights || [],
-                price_insights: data.price_insights
+            const result = await handleCopilotChat({
+                message,
+                history,
+                tripContext,
+                currentRecommendation,
+                apiKey: apiKey || process.env.GEMINI_API_KEY
             });
+
+            return res.status(200).json(result);
         } catch (error) {
-            console.error('SerpAPI Flights Proxy Error:', error);
-            return res.status(500).json({ error: 'SerpAPI search failed', details: error.message });
-        }
-    }
-);
-
-/**
- * Seats.aero Award Flights Search Proxy
- * Searches award flight availability and points costs across major loyalty programs.
- */
-exports.seatsAeroProxy = onRequest(
-    {
-        region: "us-central1",
-        memory: "256MiB",
-        timeoutSeconds: 30,
-        cors: true
-    },
-    async (req, res) => {
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-        if (req.method === 'OPTIONS') {
-            res.status(200).send('');
-            return;
-        }
-
-        try {
-            const seatsAeroApiKey = process.env.SEATS_AERO_API_KEY;
-            const { origin, destination, date } = req.query;
-
-            if (!origin || !destination) {
-                return res.status(400).json({ error: 'Missing required parameters: origin and destination' });
-            }
-
-            // Mock / Real Seats.aero integration endpoint
-            if (seatsAeroApiKey) {
-                const searchUrl = `https://seats.aero/partnerapi/search?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}`;
-                const response = await fetch(searchUrl, {
-                    headers: { 'Partner-Authorization': seatsAeroApiKey, 'Accept': 'application/json' }
-                });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    return res.json({ success: true, data: data.data || [] });
-                }
-            }
-
-            // Fallback / Helper award response structure if API key is in setup
-            return res.json({
-                success: true,
-                source: 'Seats.aero Integration Helper',
-                data: [
-                    {
-                        id: 'seats-1',
-                        airline: 'Virgin Atlantic',
-                        flightNumber: 'VS4',
-                        origin: origin,
-                        destination: destination,
-                        pointsAmount: 50000,
-                        pointsProgram: 'Virgin Atlantic Flying Blue / Amex MR',
-                        taxCashAmount: 150.00,
-                        cabinClass: 'Business / Upper Class',
-                        departureTime: '18:30',
-                        arrivalTime: '06:30 (+1)',
-                        bookingUrl: `https://seats.aero/search?origin=${origin}&destination=${destination}`
-                    },
-                    {
-                        id: 'seats-2',
-                        airline: 'Air Canada Aeroplan',
-                        flightNumber: 'AC854',
-                        origin: origin,
-                        destination: destination,
-                        pointsAmount: 60000,
-                        pointsProgram: 'Aeroplan / Chase UR',
-                        taxCashAmount: 75.00,
-                        cabinClass: 'Business Class',
-                        departureTime: '21:00',
-                        arrivalTime: '09:15 (+1)',
-                        bookingUrl: `https://seats.aero/search?origin=${origin}&destination=${destination}`
-                    }
-                ]
+            console.error('copilotChat error:', error);
+            return res.status(500).json({
+                success: false,
+                error: error.message,
+                reply: `Sorry, I encountered an error: ${error.message}`
             });
-        } catch (error) {
-            console.error('Seats.aero Proxy Error:', error);
-            return res.status(500).json({ error: 'Seats.aero search failed', details: error.message });
         }
     }
 );

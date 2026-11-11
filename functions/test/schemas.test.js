@@ -263,4 +263,119 @@ describe('Trip Submission Schema Validation', () => {
         const validation = validateTripSubmissionData(invalidSubmission);
         expect(validation.valid).toBe(false);
     });
+
+    test('validates rich Copilot dictated recommendation with pointsUsed, costNotes, and empty optional URLs without stripping fields', () => {
+        const dictatedRec = {
+            id: 'trip_123',
+            tripOverview: 'Luxury Paris points redemption',
+            costNotes: 'Transfer 100k Chase UR to Air France/KLM Flying Blue; transfer 135k Chase UR to World of Hyatt.',
+            destinations: [
+                {
+                    id: 'dest_1',
+                    cityName: 'Paris, France',
+                    arrivalDate: '2026-06-15',
+                    departureDate: '2026-06-18',
+                    numberOfNights: 3,
+                    overview: 'Stay near Place Vendôme',
+                    accommodationOptions: [
+                        {
+                            id: 'acc_1',
+                            priority: 1,
+                            bookingInstructions: 'Transfer 45k Chase UR/night to World of Hyatt',
+                            hotel: {
+                                name: 'Park Hyatt Paris-Vendôme',
+                                rating: 4.9,
+                                pricePerNight: 0,
+                                pointsPerNight: 45000,
+                                loyaltyProgram: 'World of Hyatt',
+                                location: '5 Rue de la Paix, 75002 Paris',
+                                bookingUrl: '',
+                                photoUrl: '',
+                                tripadvisorUrl: ''
+                            }
+                        }
+                    ],
+                    recommendedActivities: [
+                        {
+                            id: 'act_1',
+                            name: 'Louvre Evening Tour',
+                            description: 'Small-group evening tour',
+                            location: 'Rue de Rivoli',
+                            estimatedCost: 85,
+                            duration: '3 hours',
+                            category: 'Culture',
+                            bookingUrl: ''
+                        }
+                    ],
+                    recommendedRestaurants: [
+                        {
+                            id: 'rest_1',
+                            name: 'Le Comptoir du Relais',
+                            cuisine: 'French Bistro',
+                            location: '9 Carrefour de l\'Odéon',
+                            priceRange: '$$$',
+                            description: 'Classic bistro',
+                            reservationUrl: ''
+                        }
+                    ]
+                }
+            ],
+            logistics: {
+                generalInstructions: 'Book award flights first',
+                transportSegments: [
+                    {
+                        id: 'seg_1',
+                        fromCity: 'New York (JFK)',
+                        toCity: 'Paris (CDG)',
+                        departureDate: '2026-06-14',
+                        transportOptions: [
+                            {
+                                id: 'opt_1',
+                                transportType: 'flight',
+                                priority: 1,
+                                duration: '7h 15m',
+                                cost: {
+                                    paymentType: 'points',
+                                    cashAmount: 210,
+                                    pointsAmount: 50000,
+                                    pointsProgram: 'Air France/KLM Flying Blue'
+                                },
+                                details: {
+                                    flightNumber: 'AF 11',
+                                    airline: 'Air France',
+                                    details: {
+                                        departure: { airportCode: 'JFK', time: '19:30' },
+                                        arrival: { airportCode: 'CDG', time: '08:45' },
+                                        showDateChange: '+1 day'
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            },
+            totalCost: {
+                totalEstimate: 295,
+                flights: 210,
+                accommodation: 0,
+                activities: 85,
+                food: 0,
+                localTransport: 0,
+                miscellaneous: 0,
+                currency: 'USD',
+                pointsUsed: {
+                    'Air France/KLM Flying Blue': 50000,
+                    'World of Hyatt': 135000
+                }
+            }
+        };
+
+        const validation = validateRecommendationData(dictatedRec);
+        expect(validation.valid).toBe(true);
+        // Verify rich fields were NOT stripped by AJV
+        expect(dictatedRec.costNotes).toContain('Flying Blue');
+        expect(dictatedRec.destinations[0].overview).toBe('Stay near Place Vendôme');
+        expect(dictatedRec.destinations[0].accommodationOptions[0].bookingInstructions).toContain('World of Hyatt');
+        expect(dictatedRec.totalCost.pointsUsed['World of Hyatt']).toBe(135000);
+    });
 });
