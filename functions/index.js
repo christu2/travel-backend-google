@@ -906,66 +906,111 @@ exports.googlePlacesProxy = onRequest(
         }
 
         try {
-            const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.FIREBASE_API_KEY;
+            const apiKey = process.env.GOOGLE_PLACES_API_KEY;
             const { query, placeId, type = 'hotels' } = req.query;
 
             if (placeId) {
-                // Fetch Details for a specific place
-                const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(placeId)}&fields=name,rating,formatted_address,photos,editorial_summary,url,user_ratings_total,website,geometry&key=${apiKey}`;
-                const response = await fetch(detailsUrl);
-                const data = await response.json();
+                // Fetch Details for a specific place using Places API (New)
+                const fieldMask = [
+                    'id',
+                    'displayName',
+                    'formattedAddress',
+                    'rating',
+                    'userRatingCount',
+                    'websiteUri',
+                    'googleMapsUri',
+                    'editorialSummary',
+                    'photos',
+                    'nationalPhoneNumber'
+                ].join(',');
 
-                if (data.status !== 'OK') {
-                    return res.status(400).json({ success: false, error: data.error_message || data.status });
+                const detailsUrl = `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?languageCode=en`;
+                const response = await fetch(detailsUrl, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Goog-Api-Key': apiKey,
+                        'X-Goog-FieldMask': fieldMask
+                    }
+                });
+                const place = await response.json();
+
+                if (!response.ok) {
+                    return res.status(response.status).json({ success: false, error: place.error?.message || 'Place details request failed' });
                 }
 
-                const result = data.result || {};
-                const photoReference = result.photos?.[0]?.photo_reference;
-                const photoUrl = photoReference 
-                    ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${photoReference}&key=${apiKey}`
-                    : null;
+                let photoUrl = null;
+                if (place.photos && place.photos.length > 0) {
+                    const photoName = place.photos[0].name;
+                    photoUrl = `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=800&maxWidthPx=800&key=${apiKey}`;
+                }
 
                 return res.json({
                     success: true,
                     place: {
-                        name: result.name,
-                        rating: result.rating || 4.5,
-                        userRatingsTotal: result.user_ratings_total || 0,
-                        address: result.formatted_address || '',
-                        description: result.editorial_summary?.overview || `${result.name} - ${type}`,
-                        mapsUrl: result.url || `https://www.google.com/maps/place/?q=place_id:${placeId}`,
-                        website: result.website || null,
-                        photoUrl: photoUrl
+                        id: place.id,
+                        name: place.displayName?.text || '',
+                        rating: place.rating || 4.5,
+                        userRatingsTotal: place.userRatingCount || 0,
+                        address: place.formattedAddress || '',
+                        location: place.formattedAddress || '',
+                        description: place.editorialSummary?.text || `${place.displayName?.text || ''} - ${type}`,
+                        mapsUrl: place.googleMapsUri || `https://www.google.com/maps/place/?q=place_id:${placeId}`,
+                        website: place.websiteUri || null,
+                        photoUrl: photoUrl,
+                        phone: place.nationalPhoneNumber || ''
                     }
                 });
             } else if (query) {
-                // Search Places by Text Query
-                const searchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${apiKey}`;
-                const response = await fetch(searchUrl);
+                // Search Places by Text Query using Places API (New)
+                const fieldMask = [
+                    'places.id',
+                    'places.displayName',
+                    'places.formattedAddress',
+                    'places.rating',
+                    'places.userRatingCount',
+                    'places.websiteUri',
+                    'places.googleMapsUri',
+                    'places.editorialSummary',
+                    'places.photos'
+                ].join(',');
+
+                const response = await fetch('https://places.googleapis.com/v1/places:searchText', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Goog-Api-Key': apiKey,
+                        'X-Goog-FieldMask': fieldMask
+                    },
+                    body: JSON.stringify({
+                        textQuery: query,
+                        languageCode: 'en'
+                    })
+                });
+
                 const data = await response.json();
 
-                if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
-                    return res.status(400).json({ success: false, error: data.error_message || data.status });
+                if (!response.ok) {
+                    return res.status(response.status).json({ success: false, error: data.error?.message || 'Places search request failed' });
                 }
 
-                const results = (data.results || []).slice(0, 10).map(p => {
-                    const photoRef = p.photos?.[0]?.photo_reference;
-                    const photoUrl = photoRef
-                        ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${photoRef}&key=${apiKey}`
-                        : '';
+                const results = (data.places || []).slice(0, 10).map(p => {
+                    let photoUrl = '';
+                    if (p.photos && p.photos.length > 0) {
+                        const photoName = p.photos[0].name;
+                        photoUrl = `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=800&maxWidthPx=800&key=${apiKey}`;
+                    }
                     return {
-                        id: p.place_id,
-                        placeId: p.place_id,
-                        name: p.name,
-                        address: p.formatted_address,
-                        location: p.formatted_address,
-                        rating: p.rating,
-                        userRatingsTotal: p.user_ratings_total,
-                        numReviews: p.user_ratings_total,
-                        photoReference: photoRef,
+                        id: p.id,
+                        placeId: p.id,
+                        name: p.displayName?.text || '',
+                        address: p.formattedAddress || '',
+                        location: p.formattedAddress || '',
+                        rating: p.rating || 4.5,
+                        userRatingsTotal: p.userRatingCount || 0,
+                        numReviews: p.userRatingCount || 0,
                         photoUrl,
-                        bookingUrl: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`,
-                        googleMapsUrl: `https://www.google.com/maps/place/?q=place_id:${p.place_id}`
+                        bookingUrl: p.websiteUri || p.googleMapsUri || '',
+                        googleMapsUrl: p.googleMapsUri || ''
                     };
                 });
 
