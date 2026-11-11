@@ -5,7 +5,7 @@
  * full AdminDestinationBasedRecommendation JSON) and on-demand itinerary drafts.
  */
 
-const fetch = require('node-fetch');
+const fetch = globalThis.fetch || require('node-fetch');
 
 const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
