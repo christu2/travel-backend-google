@@ -349,8 +349,7 @@ exports.updateTripRecommendation = onRequest(
 exports.processNewTrip = onDocumentCreated(
     {
         document: 'trips/{tripId}',
-        region: "us-central1",
-        secrets: ["GMAIL_APP_PASSWORD", "SENDGRID_API_KEY"]
+        region: "us-central1"
     },
     async (event) => {
         const tripId = event.params.tripId;
@@ -718,8 +717,7 @@ async function sendDetailedItineraryNotification(tripId, tripData) {
 exports.onTripStatusUpdate = onDocumentUpdated(
     {
         document: 'trips/{tripId}',
-        region: "us-central1",
-        secrets: ["GMAIL_APP_PASSWORD", "SENDGRID_API_KEY"]
+        region: "us-central1"
     },
     async (event) => {
         const tripId = event.params.tripId;
@@ -757,8 +755,7 @@ exports.onTripStatusUpdate = onDocumentUpdated(
 exports.sendConversationNotification = onDocumentCreated(
     {
         document: 'tripConversations/{conversationId}/messages/{messageId}',
-        region: "us-central1",
-        secrets: ["GMAIL_APP_PASSWORD", "SENDGRID_API_KEY"]
+        region: "us-central1"
     },
     async (event) => {
         const conversationId = event.params.conversationId;
@@ -992,8 +989,7 @@ exports.copilotChat = onRequest(
         cors: true,
         region: "us-central1",
         memory: "512MiB",
-        timeoutSeconds: 60,
-        secrets: ["GEMINI_API_KEY"]
+        timeoutSeconds: 60
     },
     async (req, res) => {
         res.set('Access-Control-Allow-Origin', '*');
@@ -1038,8 +1034,7 @@ exports.copilotChat = onRequest(
 exports.generateTripRecommendation = onRequest(
     {
         cors: true,
-        region: "us-central1",
-        secrets: ["GEMINI_API_KEY"]
+        region: "us-central1"
     },
     async (req, res) => {
         try {
