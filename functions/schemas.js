@@ -16,11 +16,12 @@ const { schemas } = require('@wandermint/shared-schemas');
 const budgetSchema = schemas.budget;
 const travelStyleSchema = schemas.travelStyle;
 const commonTypesSchema = schemas.commonTypes;
+const recommendationSchema = schemas.recommendation;
 
 // Initialize AJV with custom options
 const ajv = new Ajv({
     allErrors: true,        // Collect all errors, not just the first one
-    removeAdditional: true, // Remove additional properties not in schema
+    removeAdditional: false, // Never silently strip rich recommendation fields
     useDefaults: true,      // Apply default values from schema
     coerceTypes: false,     // Don't coerce types - enforce strict validation
     strict: false           // Allow metadata fields like version, changelog
@@ -33,6 +34,7 @@ addFormats(ajv);
 ajv.addSchema(budgetSchema, 'budget.schema.json');
 ajv.addSchema(travelStyleSchema, 'travel-style.schema.json');
 ajv.addSchema(commonTypesSchema, 'common-types.schema.json');
+ajv.addSchema(recommendationSchema, 'recommendation.schema.json');
 
 /**
  * Trip Submission Schema
@@ -117,6 +119,16 @@ const tripSubmissionSchema = {
             enum: ['Economy', 'Premium Economy', 'Business', 'First Class'],
             description: 'Preferred flight class'
         },
+        petFriendly: {
+            type: 'boolean',
+            default: false,
+            description: 'Whether pet-friendly accommodations and activities are required'
+        },
+        optInEmailNotifications: {
+            type: 'boolean',
+            default: true,
+            description: 'Whether the user wants to receive email notifications when the trip is ready'
+        },
 
         // Legacy fields for backward compatibility
         destination: {
@@ -132,6 +144,13 @@ const tripSubmissionSchema = {
     }
 };
 
+const optionalUriField = {
+    anyOf: [
+        { type: 'string', format: 'uri', maxLength: 2000 },
+        { type: 'string', maxLength: 0 }
+    ]
+};
+
 /**
  * Destination Recommendation Schema
  * Validates data from admin dashboard when saving trip recommendations
@@ -139,6 +158,7 @@ const tripSubmissionSchema = {
 const destinationRecommendationSchema = {
     type: 'object',
     required: ['id', 'tripOverview', 'destinations', 'logistics', 'totalCost'],
+    additionalProperties: true,
     properties: {
         id: {
             type: 'string',
@@ -150,6 +170,15 @@ const destinationRecommendationSchema = {
             maxLength: 5000,
             description: 'Overview of the entire trip'
         },
+        costNotes: {
+            type: 'string',
+            maxLength: 5000,
+            description: 'Points transfer and booking strategy notes'
+        },
+        specialNotes: {
+            type: 'string',
+            maxLength: 5000
+        },
         destinations: {
             type: 'array',
             minItems: 1,
@@ -157,6 +186,7 @@ const destinationRecommendationSchema = {
             items: {
                 type: 'object',
                 required: ['id', 'cityName', 'arrivalDate', 'departureDate', 'numberOfNights'],
+                additionalProperties: true,
                 properties: {
                     id: {
                         type: 'string',
@@ -184,11 +214,16 @@ const destinationRecommendationSchema = {
                         maximum: 90,
                         description: 'Number of nights in this city'
                     },
+                    overview: {
+                        type: 'string',
+                        maxLength: 5000
+                    },
                     accommodationOptions: {
                         type: 'array',
                         items: {
                             type: 'object',
                             required: ['id', 'priority', 'hotel'],
+                            additionalProperties: true,
                             properties: {
                                 id: {
                                     type: 'string'
@@ -198,9 +233,14 @@ const destinationRecommendationSchema = {
                                     minimum: 1,
                                     maximum: 10
                                 },
+                                bookingInstructions: {
+                                    type: 'string',
+                                    maxLength: 2000
+                                },
                                 hotel: {
                                     type: 'object',
-                                    required: ['name', 'rating', 'pricePerNight', 'location', 'bookingUrl'],
+                                    required: ['name', 'rating', 'pricePerNight', 'location'],
+                                    additionalProperties: true,
                                     properties: {
                                         name: {
                                             type: 'string',
@@ -230,24 +270,27 @@ const destinationRecommendationSchema = {
                                             minLength: 1,
                                             maxLength: 500
                                         },
-                                        bookingUrl: {
+                                        bookingUrl: optionalUriField,
+                                        bookingInstructions: {
                                             type: 'string',
-                                            format: 'uri',
                                             maxLength: 2000
                                         },
                                         detailedDescription: {
                                             type: 'string',
                                             maxLength: 5000
                                         },
+                                        photoUrl: optionalUriField,
+                                        photos: {
+                                            type: 'array',
+                                            items: {
+                                                type: 'string'
+                                            }
+                                        },
                                         tripadvisorId: {
                                             type: 'string',
                                             maxLength: 50
                                         },
-                                        tripadvisorUrl: {
-                                            type: 'string',
-                                            format: 'uri',
-                                            maxLength: 2000
-                                        }
+                                        tripadvisorUrl: optionalUriField
                                     }
                                 }
                             }
@@ -257,7 +300,8 @@ const destinationRecommendationSchema = {
                         type: 'array',
                         items: {
                             type: 'object',
-                            required: ['id', 'name', 'description', 'location', 'estimatedCost', 'estimatedDuration', 'category'],
+                            required: ['id', 'name'],
+                            additionalProperties: true,
                             properties: {
                                 id: {
                                     type: 'string'
@@ -273,7 +317,6 @@ const destinationRecommendationSchema = {
                                 },
                                 location: {
                                     type: 'string',
-                                    minLength: 1,
                                     maxLength: 500
                                 },
                                 estimatedCost: {
@@ -285,10 +328,17 @@ const destinationRecommendationSchema = {
                                     type: 'string',
                                     maxLength: 100
                                 },
+                                duration: {
+                                    type: 'string',
+                                    maxLength: 100
+                                },
                                 category: {
                                     type: 'string',
                                     maxLength: 50
-                                }
+                                },
+                                website: optionalUriField,
+                                tripadvisorUrl: optionalUriField,
+                                bookingUrl: optionalUriField
                             }
                         }
                     },
@@ -296,7 +346,8 @@ const destinationRecommendationSchema = {
                         type: 'array',
                         items: {
                             type: 'object',
-                            required: ['id', 'name', 'cuisine', 'location', 'priceRange', 'description'],
+                            required: ['id', 'name'],
+                            additionalProperties: true,
                             properties: {
                                 id: {
                                     type: 'string'
@@ -312,18 +363,19 @@ const destinationRecommendationSchema = {
                                 },
                                 location: {
                                     type: 'string',
-                                    minLength: 1,
                                     maxLength: 500
                                 },
                                 priceRange: {
                                     type: 'string',
-                                    pattern: '^\\$+$',
                                     maxLength: 10
                                 },
                                 description: {
                                     type: 'string',
                                     maxLength: 2000
-                                }
+                                },
+                                yelpUrl: optionalUriField,
+                                website: optionalUriField,
+                                reservationUrl: optionalUriField
                             }
                         }
                     },
@@ -335,6 +387,7 @@ const destinationRecommendationSchema = {
         },
         logistics: {
             type: 'object',
+            additionalProperties: true,
             properties: {
                 transportSegments: {
                     type: 'array',
@@ -357,6 +410,7 @@ const destinationRecommendationSchema = {
         totalCost: {
             type: 'object',
             required: ['totalEstimate', 'flights', 'accommodation', 'activities', 'food', 'localTransport', 'miscellaneous', 'currency'],
+            additionalProperties: true,
             properties: {
                 totalEstimate: {
                     type: 'number',
@@ -391,6 +445,13 @@ const destinationRecommendationSchema = {
                     type: 'string',
                     pattern: '^[A-Z]{3}$',
                     description: 'ISO 4217 currency code (e.g., USD, EUR)'
+                },
+                pointsUsed: {
+                    type: 'object',
+                    additionalProperties: {
+                        type: 'number',
+                        minimum: 0
+                    }
                 }
             }
         },
@@ -451,6 +512,7 @@ function validateDestinationDates(recommendation) {
 // Compile schemas
 const validateTripSubmission = ajv.compile(tripSubmissionSchema);
 const validateDestinationRecommendation = ajv.compile(destinationRecommendationSchema);
+const validateSharedRecommendation = ajv.compile(recommendationSchema);
 
 /**
  * Validate trip submission data with custom validations
@@ -481,7 +543,7 @@ function validateTripSubmissionData(data) {
 }
 
 /**
- * Validate recommendation data with custom validations
+ * Validate recommendation data with custom validations (legacy inline schema)
  * @param {Object} data - Recommendation data from admin dashboard
  * @returns {Object} { valid: boolean, errors: Array }
  */
@@ -508,9 +570,40 @@ function validateRecommendationData(data) {
     return { valid: true };
 }
 
+/**
+ * Validate recommendation data using shared schema (single source of truth)
+ * @param {Object} data - Recommendation data from admin dashboard
+ * @returns {Object} { valid: boolean, errors: Array }
+ */
+function validateRecommendationWithSharedSchema(data) {
+    const schemaValid = validateSharedRecommendation(data);
+
+    if (!schemaValid) {
+        return {
+            valid: false,
+            errors: validateSharedRecommendation.errors.map(err => ({
+                field: err.instancePath || err.params.missingProperty,
+                message: err.message,
+                value: err.data
+            }))
+        };
+    }
+
+    // Custom destination date validation
+    const dateValidation = validateDestinationDates(data);
+    if (!dateValidation.valid) {
+        return dateValidation;
+    }
+
+    return { valid: true };
+}
+
 module.exports = {
     validateTripSubmissionData,
     validateRecommendationData,
+    validateRecommendationWithSharedSchema,
     tripSubmissionSchema,
-    destinationRecommendationSchema
+    destinationRecommendationSchema,
+    recommendationSchema,
+    schemas
 };
