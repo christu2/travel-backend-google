@@ -7,7 +7,7 @@
 
 const fetch = globalThis.fetch || require('node-fetch');
 
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const ADMIN_RECOMMENDATION_SCHEMA_GUIDE = `
