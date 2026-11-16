@@ -177,12 +177,11 @@ DICTATION AUTO-COMPLETION RULES:
  * Call the Gemini API with structured prompt and optional JSON schema enforcement
  */
 async function callGemini({ prompt, contents = null, systemInstruction, apiKey, jsonMode = false, model = DEFAULT_MODEL, temperature = 0.25 }) {
-    const key = apiKey || process.env.GEMINI_API_KEY;
+    const envKey = process.env.GEMINI_API_KEY;
+    const key = apiKey || envKey;
     if (!key) {
         throw new Error('GEMINI_API_KEY is not configured');
     }
-
-    const url = `${GEMINI_BASE_URL}/${model}:generateContent?key=${key}`;
 
     const messageContents = contents || [
         {
@@ -197,7 +196,8 @@ async function callGemini({ prompt, contents = null, systemInstruction, apiKey, 
             temperature,
             topP: 0.95,
             topK: 40,
-            maxOutputTokens: 8192
+            maxOutputTokens: 8192,
+            thinkingConfig: { thinkingBudget: 0 }
         }
     };
 
@@ -211,17 +211,32 @@ async function callGemini({ prompt, contents = null, systemInstruction, apiKey, 
         requestBody.generationConfig.responseMimeType = 'application/json';
     }
 
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(requestBody)
-    });
+    const sendWithKey = async (targetKey) => {
+        const url = `${GEMINI_BASE_URL}/${model}:generateContent?key=${targetKey}`;
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+        if (!resp.ok) {
+            const errText = await resp.text();
+            const err = new Error(`Gemini API error (${resp.status}): ${errText}`);
+            err.status = resp.status;
+            throw err;
+        }
+        return resp;
+    };
 
-    if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Gemini API error (${response.status}): ${errText}`);
+    let response;
+    try {
+        response = await sendWithKey(key);
+    } catch (err) {
+        if (apiKey && envKey && apiKey !== envKey && (err.status === 400 || err.status === 402 || err.status === 403)) {
+            console.warn('Client override API key failed; falling back to server GEMINI_API_KEY.');
+            response = await sendWithKey(envKey);
+        } else {
+            throw err;
+        }
     }
 
     const data = await response.json();
