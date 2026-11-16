@@ -215,20 +215,44 @@ async function callGemini({ prompt, contents = null, systemInstruction, apiKey, 
         requestBody.generationConfig.responseMimeType = 'application/json';
     }
 
+    const MODEL_FALLBACKS = [
+        'gemini-3-flash-preview',
+        'gemini-3.5-flash',
+        'gemini-3.1-flash-lite',
+        'gemini-3.5-flash-lite',
+        'gemini-3.8-flash',
+        'gemini-flash-latest'
+    ];
+
+    const buildBodyForModel = (targetModel) => {
+        const copy = JSON.parse(JSON.stringify(requestBody));
+        if (targetModel.includes('lite') && copy.generationConfig?.thinkingConfig) {
+            delete copy.generationConfig.thinkingConfig;
+        }
+        return copy;
+    };
+
     const sendWithKey = async (targetKey) => {
-        const url = `${GEMINI_BASE_URL}/${model}:generateContent?key=${targetKey}`;
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
-        if (!resp.ok) {
+        const modelsToTry = [model, ...MODEL_FALLBACKS.filter(m => m !== model)];
+        let lastErr;
+        for (const targetModel of modelsToTry) {
+            const url = `${GEMINI_BASE_URL}/${targetModel}:generateContent?key=${targetKey}`;
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildBodyForModel(targetModel))
+            });
+            if (resp.ok) return resp;
             const errText = await resp.text();
             const err = new Error(`Gemini API error (${resp.status}): ${errText}`);
             err.status = resp.status;
-            throw err;
+            lastErr = err;
+            if (resp.status !== 429 && resp.status !== 404 && resp.status !== 503) {
+                throw err;
+            }
+            console.warn(`Model ${targetModel} returned ${resp.status}; falling back to next Gemini model.`);
         }
-        return resp;
+        throw lastErr;
     };
 
     let response;
