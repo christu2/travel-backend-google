@@ -15,7 +15,7 @@ service cloud.firestore {
     }
 
     // Users can read/create their own trips, update booking selections without tampering with status/userId,
-    // and delete only pending trips they own. Admins have full access.
+    // and delete their own completed/cancelled/failed or past trips (matching iOS client rules). Admins have full access.
     match /trips/{tripId} {
       allow read: if (request.auth != null && request.auth.uid == resource.data.userId) || isAdmin();
       allow create: if (request.auth != null &&
@@ -29,8 +29,10 @@ service cloud.firestore {
       );
       allow delete: if isAdmin() || (
         request.auth != null &&
-        request.auth.uid == resource.data.userId &&
-        resource.data.status == 'pending'
+        request.auth.uid == resource.data.userId && (
+          resource.data.status in ['completed', 'cancelled', 'failed'] ||
+          (resource.data.endDate is timestamp && resource.data.endDate < request.time)
+        )
       );
     }
 

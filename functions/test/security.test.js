@@ -33,7 +33,7 @@ describe('Backend Security Hardening Checks', () => {
 
     test('Firestore rules prevent users from tampering with trip status or spoofing admin messages', () => {
         expect(rulesSrc).toContain('request.resource.data.status == resource.data.status');
-        expect(rulesSrc).toContain("resource.data.status == 'pending'");
+        expect(rulesSrc).toContain("resource.data.status in ['completed', 'cancelled', 'failed']");
         expect(rulesSrc).toContain("request.resource.data.senderType == 'user'");
         expect(rulesSrc).toContain("request.resource.data.senderId == request.auth.uid");
         expect(rulesSrc).toContain("affectedKeys().hasOnly(['isRead'])");
