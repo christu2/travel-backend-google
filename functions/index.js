@@ -18,6 +18,33 @@ const sanitizeString = (input) => {
     return input.trim().replace(/[<>\"'&]/g, '');
 };
 
+/**
+ * Verifies Firebase ID token from Authorization: Bearer <token>.
+ * Optionally enforces `admin: true` custom claim.
+ * Returns decodedToken on success, or writes 401/403 response and returns null.
+ */
+async function verifyAuthRequest(req, res, { requireAdmin = false } = {}) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        res.status(401).json({ success: false, error: 'Unauthorized: Missing Bearer token' });
+        return null;
+    }
+
+    try {
+        const idToken = authHeader.split('Bearer ')[1].trim();
+        const decodedToken = await auth.verifyIdToken(idToken);
+        if (requireAdmin && !decodedToken.admin) {
+            res.status(403).json({ success: false, error: 'Forbidden: Admin access required' });
+            return null;
+        }
+        return decodedToken;
+    } catch (err) {
+        console.warn('Auth token verification failed:', err.code || err.message);
+        res.status(401).json({ success: false, error: 'Unauthorized: Invalid or expired token' });
+        return null;
+    }
+}
+
 // Lazy load Nodemailer or SendGrid for email notifications
 let mailTransporter = null;
 let sgMail = null;
@@ -905,6 +932,9 @@ exports.googlePlacesProxy = onRequest(
             return;
         }
 
+        const decodedAdmin = await verifyAuthRequest(req, res, { requireAdmin: true });
+        if (!decodedAdmin) return;
+
         try {
             const apiKey = process.env.GOOGLE_PLACES_API_KEY;
             const { query, placeId, type = 'hotels' } = req.query;
@@ -1049,6 +1079,9 @@ exports.copilotChat = onRequest(
             return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
         }
 
+        const decodedAdmin = await verifyAuthRequest(req, res, { requireAdmin: true });
+        if (!decodedAdmin) return;
+
         try {
             const { message, history = [], tripContext = {}, currentRecommendation = null, apiKey } = req.body || {};
             if (!message) {
@@ -1083,9 +1116,15 @@ exports.generateTripRecommendation = onRequest(
     },
     async (req, res) => {
         try {
+            if (req.method === 'OPTIONS') {
+                return res.status(200).send('');
+            }
             if (req.method !== 'POST') {
                 return res.status(405).json({ error: 'Method not allowed. Use POST.' });
             }
+
+            const decodedAdmin = await verifyAuthRequest(req, res, { requireAdmin: true });
+            if (!decodedAdmin) return;
 
             const { tripId, tripData: customTripData, pointsData: customPointsData } = req.body || {};
             const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -1153,6 +1192,77 @@ exports.generateTripRecommendation = onRequest(
         } catch (error) {
             console.error('generateTripRecommendation error:', error);
             return res.status(500).json({ error: 'AI generation failed', details: error.message });
+        }
+    }
+);
+
+/**
+ * Authenticated Account & Data Deletion Endpoint (Apple App Store Guideline 5.1.1(v))
+ * Permanently deletes all Firestore data owned by the authenticated user and removes their Firebase Auth account.
+ */
+exports.deleteUserAccount = onRequest(
+    {
+        cors: true,
+        region: "us-central1",
+        memory: "512MiB",
+        timeoutSeconds: 60
+    },
+    async (req, res) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'POST, DELETE, OPTIONS');
+        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+        if (req.method === 'OPTIONS') {
+            return res.status(200).send('');
+        }
+
+        if (req.method !== 'POST' && req.method !== 'DELETE') {
+            return res.status(405).json({ success: false, error: 'Method not allowed' });
+        }
+
+        const decodedToken = await verifyAuthRequest(req, res, { requireAdmin: false });
+        if (!decodedToken) return;
+
+        const uid = decodedToken.uid;
+
+        try {
+            const deleteDocsInChunks = async (docRefs) => {
+                const chunkSize = 400;
+                for (let i = 0; i < docRefs.length; i += chunkSize) {
+                    const batch = db.batch();
+                    docRefs.slice(i, i + chunkSize).forEach(ref => batch.delete(ref));
+                    await batch.commit();
+                }
+            };
+
+            const refsToDelete = [
+                db.collection('users').doc(uid),
+                db.collection('userPoints').doc(uid),
+                db.collection('userSubmissions').doc(uid)
+            ];
+
+            // Collect all user's trips
+            const tripsSnap = await db.collection('trips').where('userId', '==', uid).get();
+            tripsSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+            // Collect all user's conversations and nested messages
+            const convSnap = await db.collection('tripConversations').where('userId', '==', uid).get();
+            for (const convDoc of convSnap.docs) {
+                const msgsSnap = await convDoc.ref.collection('messages').get();
+                msgsSnap.forEach(msgDoc => refsToDelete.push(msgDoc.ref));
+                refsToDelete.push(convDoc.ref);
+            }
+
+            await deleteDocsInChunks(refsToDelete);
+
+            // Delete Firebase Authentication record last
+            await auth.deleteUser(uid);
+
+            console.log(`Account and all Firestore data deleted for user ${uid}`);
+            return res.status(200).json({ success: true });
+        } catch (error) {
+            console.error(`Error deleting account for user ${uid}:`, error);
+            return res.status(500).json({ success: false, error: 'Failed to delete account', details: error.message });
         }
     }
 );
