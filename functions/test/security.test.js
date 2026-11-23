@@ -45,4 +45,39 @@ describe('Backend Security Hardening Checks', () => {
         const block = rulesSrc.slice(matchIdx, matchIdx + 200);
         expect(block).toContain('allow write: if isAdmin();');
     });
+
+    test('OWASP A01/A05: No wildcard Access-Control-Allow-Origin * in Cloud Functions', () => {
+        expect(indexSrc).not.toContain("Access-Control-Allow-Origin', '*'");
+        expect(indexSrc).toContain('ALLOWED_CORS_ORIGINS');
+    });
+
+    test('OWASP A02/A10: googlePlacesProxy never embeds server API key in returned photoUrl and validates IDs', () => {
+        expect(indexSrc).not.toContain('&key=${apiKey}');
+        expect(indexSrc).toContain('skipHttpRedirect=true');
+        expect(indexSrc).toContain('PLACE_ID_REGEX');
+        expect(indexSrc).toContain('PHOTO_NAME_REGEX');
+    });
+
+    test('OWASP A03: Outbound HTML emails escape user-controlled content and validate URL schemes', () => {
+        expect(indexSrc).toContain('const escapeHtml =');
+        expect(indexSrc).toContain('const safeHttpUrl =');
+        expect(indexSrc).toContain('${safeContent}');
+        expect(indexSrc).toContain('${escapeHtml(userName)}');
+    });
+
+    test('OWASP A04: submitTrip daily rate limiting uses atomic Firestore transaction', () => {
+        const fnIdx = indexSrc.indexOf('exports.submitTrip');
+        const nextFnIdx = indexSrc.indexOf('exports.updateTripRecommendation');
+        const submitBody = indexSrc.slice(fnIdx, nextFnIdx);
+        expect(submitBody).toContain('db.runTransaction');
+    });
+
+    test('OWASP A07: Token verification enforces revocation checking (checkRevoked: true)', () => {
+        expect(indexSrc).toContain('auth.verifyIdToken(idToken, true)');
+    });
+
+    test('OWASP A09: Error handlers do not dump full serialized error objects or raw user emails to logs', () => {
+        expect(indexSrc).not.toContain('JSON.stringify(error');
+        expect(indexSrc).not.toContain('Email: ${userEmail}');
+    });
 });

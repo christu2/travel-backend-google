@@ -12,14 +12,85 @@ initializeApp();
 const db = getFirestore();
 const auth = getAuth();
 
-// Input sanitization helper
+// Explicit CORS origin allowlist (native iOS clients ignore CORS; web requests are restricted)
+const ALLOWED_CORS_ORIGINS = [
+    'https://travel-consulting-app-1.web.app',
+    'https://travel-consulting-app-1.firebaseapp.com',
+    'http://localhost:8000',
+    'http://127.0.0.1:8000'
+];
+
+function applyCorsHeaders(req, res, methods = 'POST, OPTIONS') {
+    const origin = req.headers.origin;
+    if (origin && ALLOWED_CORS_ORIGINS.includes(origin)) {
+        res.set('Access-Control-Allow-Origin', origin);
+        res.set('Vary', 'Origin');
+    }
+    res.set('Access-Control-Allow-Methods', methods);
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+}
+
+// Input sanitization helper (for stored plain text)
 const sanitizeString = (input) => {
     if (typeof input !== 'string') return input;
     return input.trim().replace(/[<>\"'&]/g, '');
 };
 
+// HTML-escaping helper (prevents HTML/XSS injection in outbound emails)
+const escapeHtml = (input) => {
+    if (input === null || input === undefined) return '';
+    return String(input)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+};
+
+// Safe external URL validator (blocks javascript:, data:, file:, etc. in email hrefs)
+const safeHttpUrl = (input) => {
+    if (typeof input !== 'string' || !input.trim()) return '';
+    try {
+        const parsed = new URL(input.trim());
+        if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+            return escapeHtml(parsed.href);
+        }
+        return '';
+    } catch {
+        return '';
+    }
+};
+
+// Strict Google Places identifier patterns (SSRF / path traversal protection)
+const PLACE_ID_REGEX = /^[A-Za-z0-9_-]{10,200}$/;
+const PHOTO_NAME_REGEX = /^places\/[A-Za-z0-9_-]+\/photos\/[A-Za-z0-9_-]+$/;
+
 /**
- * Verifies Firebase ID token from Authorization: Bearer <token>.
+ * Resolves a Google Places photo reference to a public keyless CDN URL (lh3.googleusercontent.com)
+ * so the server-side GOOGLE_PLACES_API_KEY is never exposed to clients or stored in Firestore.
+ */
+async function resolvePublicPhotoUrl(photoName, apiKey) {
+    if (!photoName || !PHOTO_NAME_REGEX.test(photoName) || !apiKey) {
+        return '';
+    }
+    try {
+        const mediaEndpoint = `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=800&maxWidthPx=800&skipHttpRedirect=true`;
+        const resp = await fetch(mediaEndpoint, {
+            headers: {
+                'X-Goog-Api-Key': apiKey
+            }
+        });
+        if (!resp.ok) return '';
+        const data = await resp.json();
+        return typeof data.photoUri === 'string' && data.photoUri.startsWith('https://') ? data.photoUri : '';
+    } catch (err) {
+        console.warn('Could not resolve public photo URI:', err.message);
+        return '';
+    }
+}
+
+/**
+ * Verifies Firebase ID token from Authorization: Bearer <token> with revocation checking enabled.
  * Optionally enforces `admin: true` custom claim.
  * Returns decodedToken on success, or writes 401/403 response and returns null.
  */
@@ -32,15 +103,15 @@ async function verifyAuthRequest(req, res, { requireAdmin = false } = {}) {
 
     try {
         const idToken = authHeader.split('Bearer ')[1].trim();
-        const decodedToken = await auth.verifyIdToken(idToken);
+        const decodedToken = await auth.verifyIdToken(idToken, true);
         if (requireAdmin && !decodedToken.admin) {
             res.status(403).json({ success: false, error: 'Forbidden: Admin access required' });
             return null;
         }
         return decodedToken;
     } catch (err) {
-        console.warn('Auth token verification failed:', err.code || err.message);
-        res.status(401).json({ success: false, error: 'Unauthorized: Invalid or expired token' });
+        console.warn('Auth token verification failed:', err.code || 'invalid_token');
+        res.status(401).json({ success: false, error: 'Unauthorized: Invalid, expired, or revoked token' });
         return null;
     }
 }
@@ -91,13 +162,10 @@ exports.submitTrip = onRequest(
         region: "us-central1",
         memory: "512MiB",
         timeoutSeconds: 60,
-        cors: true
+        cors: ALLOWED_CORS_ORIGINS
     },
     async (req, res) => {
-        // Set CORS headers
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        applyCorsHeaders(req, res, 'POST, OPTIONS');
         
         // Handle preflight OPTIONS request
         if (req.method === 'OPTIONS') {
@@ -111,15 +179,8 @@ exports.submitTrip = onRequest(
         }
         
         try {
-            // Get ID token from Authorization header
-            const authHeader = req.headers.authorization;
-            if (!authHeader || !authHeader.startsWith('Bearer ')) {
-                res.status(401).send('Unauthorized: Missing or invalid token');
-                return;
-            }
-            
-            const idToken = authHeader.split('Bearer ')[1];
-            const decodedToken = await auth.verifyIdToken(idToken);
+            const decodedToken = await verifyAuthRequest(req, res, { requireAdmin: false });
+            if (!decodedToken) return;
             const uid = decodedToken.uid;
 
             const data = req.body;
@@ -171,25 +232,35 @@ exports.submitTrip = onRequest(
             const specialRequests = sanitizeString(data.specialRequests) || '';
             const interests = data.interests ? data.interests.map(i => sanitizeString(i)).filter(i => i) : [];
             
-            // Check rate limiting
+            // Transactional daily rate limit check & increment (prevents concurrent burst bypass)
             const today = new Date();
             today.setHours(0, 0, 0, 0);
-            
             const userSubmissionsRef = db.collection('userSubmissions').doc(uid);
-            const userSubmissionDoc = await userSubmissionsRef.get();
-            
-            if (userSubmissionDoc.exists) {
-                const submissionData = userSubmissionDoc.data();
-                const lastSubmissionDate = submissionData.lastSubmissionDate?.toDate();
-                const submissionCount = submissionData.submissionCount || 0;
-                
-                // Check if user has exceeded daily limit
-                if (lastSubmissionDate && 
-                    lastSubmissionDate.toDateString() === today.toDateString() && 
-                    submissionCount >= 10) {
-                    res.status(429).send('Daily submission limit reached (10 submissions per day)');
-                    return;
+
+            const rateLimitAllowed = await db.runTransaction(async (tx) => {
+                const doc = await tx.get(userSubmissionsRef);
+                let newCount = 1;
+                if (doc.exists) {
+                    const submissionData = doc.data();
+                    const lastSubmissionDate = submissionData.lastSubmissionDate?.toDate();
+                    const submissionCount = submissionData.submissionCount || 0;
+                    if (lastSubmissionDate && lastSubmissionDate.toDateString() === today.toDateString()) {
+                        if (submissionCount >= 10) {
+                            return false;
+                        }
+                        newCount = submissionCount + 1;
+                    }
                 }
+                tx.set(userSubmissionsRef, {
+                    lastSubmissionDate: FieldValue.serverTimestamp(),
+                    submissionCount: newCount
+                });
+                return true;
+            });
+
+            if (!rateLimitAllowed) {
+                res.status(429).send('Daily submission limit reached (10 submissions per day)');
+                return;
             }
             
             // Parse dates from the iOS app - handle date-only strings to preserve calendar dates globally
@@ -270,28 +341,11 @@ exports.submitTrip = onRequest(
 
             const tripRef = await db.collection('trips').add(tripData);
             
-            // Update user submissions tracking
-            const newSubmissionCount = userSubmissionDoc.exists && 
-                userSubmissionDoc.data().lastSubmissionDate?.toDate()?.toDateString() === today.toDateString() 
-                ? (userSubmissionDoc.data().submissionCount || 0) + 1 
-                : 1;
-                
-            await userSubmissionsRef.set({
-                lastSubmissionDate: FieldValue.serverTimestamp(),
-                submissionCount: newSubmissionCount
-            });
-            
             res.status(200).json({ tripId: tripRef.id, success: true });
             
         } catch (error) {
             console.error('Error submitting trip:', error);
-            if (error.code === 'auth/id-token-expired') {
-                res.status(401).send('Token expired');
-            } else if (error.code === 'auth/argument-error') {
-                res.status(401).send('Invalid token');
-            } else {
-                res.status(500).send(`Failed to submit trip: ${error.message}`);
-            }
+            res.status(500).json({ success: false, error: 'Failed to submit trip' });
         }
     }
 );
@@ -302,33 +356,24 @@ exports.updateTripRecommendation = onRequest(
         region: "us-central1",
         memory: "512MiB",
         timeoutSeconds: 60,
-        cors: true
+        cors: ALLOWED_CORS_ORIGINS
     },
     async (req, res) => {
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        applyCorsHeaders(req, res, 'POST, OPTIONS');
         
         if (req.method === 'OPTIONS') {
             res.status(200).send('');
             return;
         }
         
+        if (req.method !== 'POST') {
+            res.status(405).send('Method Not Allowed');
+            return;
+        }
+        
         try {
-            const authHeader = req.headers.authorization;
-            if (!authHeader || !authHeader.startsWith('Bearer ')) {
-                res.status(401).send('Unauthorized');
-                return;
-            }
-            
-            const idToken = authHeader.split('Bearer ')[1];
-            const decodedToken = await auth.verifyIdToken(idToken);
-            
-            // Only allow admin users to update recommendations
-            if (!decodedToken.admin) {
-                res.status(403).send('Admin access required');
-                return;
-            }
+            const decodedToken = await verifyAuthRequest(req, res, { requireAdmin: true });
+            if (!decodedToken) return;
             
             const { tripId, recommendation } = req.body;
 
@@ -367,7 +412,7 @@ exports.updateTripRecommendation = onRequest(
             
         } catch (error) {
             console.error('Error updating trip:', error);
-            res.status(500).send(`Error: ${error.message}`);
+            res.status(500).json({ success: false, error: 'Failed to update trip recommendation' });
         }
     }
 );
@@ -474,21 +519,34 @@ async function sendNewTripNotification(tripId, tripData, existingPointsData = nu
         console.warn('Could not fetch user data:', error);
     }
     
-    // Helper function to format points breakdown
+    // Helper function to format points breakdown (HTML-escaped)
     const formatPointsBreakdown = (pointsCategory, categoryName) => {
         const entries = Object.entries(pointsCategory);
-        if (entries.length === 0) return `<p><strong>${categoryName}:</strong> None</p>`;
+        if (entries.length === 0) return `<p><strong>${escapeHtml(categoryName)}:</strong> None</p>`;
         
         return `
-            <p><strong>${categoryName}:</strong></p>
+            <p><strong>${escapeHtml(categoryName)}:</strong></p>
             <ul style="margin: 0; padding-left: 20px;">
                 ${entries.map(([provider, points]) => 
-                    `<li>${provider}: ${points.toLocaleString()} pts</li>`
+                    `<li>${escapeHtml(provider)}: ${Number(points || 0).toLocaleString()} pts</li>`
                 ).join('')}
             </ul>
         `;
     };
     
+    const safeUserName = escapeHtml(userName);
+    const safeUserEmail = escapeHtml(userEmail);
+    const safeTripId = escapeHtml(tripId);
+    const safeUserId = escapeHtml(tripData.userId);
+    const safeDestinations = escapeHtml(tripData.destinations?.join(', ') || tripData.destination || 'Not specified');
+    const safeDepartureLocation = escapeHtml(tripData.departureLocation);
+    const safePaymentMethod = escapeHtml(tripData.paymentMethod || 'Not specified');
+    const safeFlightClass = escapeHtml(tripData.flightClass);
+    const safeBudget = escapeHtml(tripData.budget || 'Not specified');
+    const safeTravelStyle = escapeHtml(tripData.travelStyle || 'Not specified');
+    const safeInterests = escapeHtml(tripData.interests?.join(', ') || 'None specified');
+    const safeSpecialRequests = escapeHtml(tripData.specialRequests);
+
     const msg = {
         to: 'nchristus93@gmail.com',
         from: 'noreply@wandermint.io',
@@ -496,13 +554,13 @@ async function sendNewTripNotification(tripId, tripData, existingPointsData = nu
         html: `
             <h2>🌍 New Trip Request</h2>
             
-            <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #ffc107;">
+            <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #ffc707;">
                 <h3>👤 Client Info</h3>
-                <p><strong>Name:</strong> ${userName}</p>
-                <p><strong>Email:</strong> ${userEmail}</p>
+                <p><strong>Name:</strong> ${safeUserName}</p>
+                <p><strong>Email:</strong> ${safeUserEmail}</p>
                 <p><strong>Total Points:</strong> <span style="font-size: 1.2em; color: #28a745; font-weight: bold;">${pointsData.totalPoints.toLocaleString()}</span></p>
-                <p><strong>User ID:</strong> ${tripData.userId}</p>
-                <p><strong>Trip ID:</strong> ${tripId}</p>
+                <p><strong>User ID:</strong> ${safeUserId}</p>
+                <p><strong>Trip ID:</strong> ${safeTripId}</p>
             </div>
             
             <div style="background: #e8f5e8; padding: 20px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #28a745;">
@@ -514,30 +572,30 @@ async function sendNewTripNotification(tripId, tripData, existingPointsData = nu
             
             <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 16px 0;">
                 <h3>📍 Trip Details</h3>
-                <p><strong>Destination(s):</strong> ${tripData.destinations?.join(', ') || tripData.destination || 'Not specified'}</p>
-                ${tripData.departureLocation ? `<p><strong>Departing from:</strong> ${tripData.departureLocation}</p>` : ''}
-                <p><strong>Dates:</strong> ${tripData.startDate?.toDate?.()?.toLocaleDateString() || 'Not specified'} - ${tripData.endDate?.toDate?.()?.toLocaleDateString() || 'Not specified'}</p>
+                <p><strong>Destination(s):</strong> ${safeDestinations}</p>
+                ${tripData.departureLocation ? `<p><strong>Departing from:</strong> ${safeDepartureLocation}</p>` : ''}
+                <p><strong>Dates:</strong> ${escapeHtml(tripData.startDate?.toDate?.()?.toLocaleDateString() || 'Not specified')} - ${escapeHtml(tripData.endDate?.toDate?.()?.toLocaleDateString() || 'Not specified')}</p>
                 <p><strong>Flexible Dates:</strong> ${tripData.flexibleDates ? 'Yes' : 'No'}</p>
-                ${tripData.tripDuration ? `<p><strong>Trip Duration:</strong> ${tripData.tripDuration} days</p>` : ''}
-                <p><strong>Payment Method:</strong> ${tripData.paymentMethod || 'Not specified'}</p>
-                ${tripData.flightClass ? `<p><strong>Flight Class:</strong> ${tripData.flightClass}</p>` : ''}
+                ${tripData.tripDuration ? `<p><strong>Trip Duration:</strong> ${Number(tripData.tripDuration)} days</p>` : ''}
+                <p><strong>Payment Method:</strong> ${safePaymentMethod}</p>
+                ${tripData.flightClass ? `<p><strong>Flight Class:</strong> ${safeFlightClass}</p>` : ''}
             </div>
             
             <div style="background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 16px 0;">
                 <h3>✨ Client Preferences</h3>
-                <p><strong>Budget:</strong> ${tripData.budget || 'Not specified'}</p>
-                <p><strong>Travel Style:</strong> ${tripData.travelStyle || 'Not specified'}</p>
-                <p><strong>Group Size:</strong> ${tripData.groupSize || 1} ${(tripData.groupSize || 1) === 1 ? 'person' : 'people'}</p>
+                <p><strong>Budget:</strong> ${safeBudget}</p>
+                <p><strong>Travel Style:</strong> ${safeTravelStyle}</p>
+                <p><strong>Group Size:</strong> ${Number(tripData.groupSize || 1)} ${(tripData.groupSize || 1) === 1 ? 'person' : 'people'}</p>
                 <p><strong>Pet-Friendly:</strong> ${tripData.petFriendly ? '🐾 Yes (Requires Pet-Friendly Stays & Activities)' : 'No'}</p>
-                <p><strong>Interests:</strong> ${tripData.interests?.join(', ') || 'None specified'}</p>
-                ${tripData.specialRequests ? `<p><strong>Special Requests:</strong> ${tripData.specialRequests}</p>` : ''}
+                <p><strong>Interests:</strong> ${safeInterests}</p>
+                ${tripData.specialRequests ? `<p><strong>Special Requests:</strong> ${safeSpecialRequests}</p>` : ''}
             </div>
 
             ${aiDossierHtml}
             
             <div style="background: #f3e5f5; padding: 20px; border-radius: 8px; margin: 16px 0;">
                 <h3>📊 Submission Info</h3>
-                <p><strong>Submitted:</strong> ${new Date().toLocaleString()}</p>
+                <p><strong>Submitted:</strong> ${escapeHtml(new Date().toLocaleString())}</p>
                 <p><strong>Status:</strong> <span style="color: #ffc107; font-weight: bold;">${aiDossierHtml ? 'AI Draft Pre-Populated (Ready for Review)' : 'Pending Manual Planning'}</span></p>
             </div>
             
@@ -557,7 +615,7 @@ async function sendNewTripNotification(tripId, tripData, existingPointsData = nu
     };
 
     await sendEmail(msg);
-    console.log(`Email notification sent for trip: ${tripId} (User: ${userName}, Total Points: ${pointsData.totalPoints.toLocaleString()})`);
+    console.log(`Email notification sent for trip: ${tripId} (Total Points: ${pointsData.totalPoints.toLocaleString()})`);
 }
 
 // Send detailed itinerary completion notification
@@ -591,61 +649,66 @@ async function sendDetailedItineraryNotification(tripId, tripData) {
         const destinationsHtml = destRec.destinations.map((dest, dIdx) => {
             const hotelsHtml = (dest.accommodationOptions || []).map(acc => {
                 const h = acc.hotel || {};
-                const mapQuery = encodeURIComponent(`${h.name} ${h.location || dest.cityName}`);
+                const mapQuery = encodeURIComponent(`${h.name || ''} ${h.location || dest.cityName || ''}`);
+                const bookingHref = safeHttpUrl(h.bookingUrl);
+                const tripAdvisorHref = safeHttpUrl(h.tripadvisorUrl);
                 return `
                     <div style="background: white; border-radius: 8px; padding: 14px; margin: 10px 0; border: 1px solid #e2e8f0; border-left: 4px solid #3b82f6;">
                         <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;">
-                            <strong style="color: #1e3a8a; font-size: 16px;">${h.name || 'Hotel'}</strong>
-                            <span style="color: #059669; font-weight: bold;">$${h.pricePerNight || 0}/night ${h.pointsPerNight ? `· ${h.pointsPerNight.toLocaleString()} pts` : ''}</span>
+                            <strong style="color: #1e3a8a; font-size: 16px;">${escapeHtml(h.name || 'Hotel')}</strong>
+                            <span style="color: #059669; font-weight: bold;">$${Number(h.pricePerNight || 0)}/night ${h.pointsPerNight ? `· ${Number(h.pointsPerNight).toLocaleString()} pts` : ''}</span>
                         </div>
                         <p style="color: #4b5563; margin: 4px 0 6px 0; font-size: 13px;">
-                            ⭐ ${h.rating || 4.5}/5 · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${h.location || dest.cityName} 🗺️</a>
+                            ⭐ ${escapeHtml(h.rating || 4.5)}/5 · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${escapeHtml(h.location || dest.cityName)} 🗺️</a>
                         </p>
-                        ${h.detailedDescription ? `<p style="color: #374151; margin: 6px 0; font-size: 14px; line-height: 1.4;">${h.detailedDescription}</p>` : ''}
+                        ${h.detailedDescription ? `<p style="color: #374151; margin: 6px 0; font-size: 14px; line-height: 1.4;">${escapeHtml(h.detailedDescription)}</p>` : ''}
                         <div style="margin-top: 8px; font-size: 13px;">
-                            ${h.bookingUrl ? `<a href="${h.bookingUrl}" style="background: #2563eb; color: white; padding: 4px 10px; border-radius: 4px; text-decoration: none; display: inline-block; margin-right: 8px; font-size: 12px;" target="_blank">Book Hotel</a>` : ''}
-                            ${h.tripadvisorUrl ? `<a href="${h.tripadvisorUrl}" style="color: #0284c7; text-decoration: none; margin-right: 8px;" target="_blank">TripAdvisor Reviews</a>` : ''}
+                            ${bookingHref ? `<a href="${bookingHref}" style="background: #2563eb; color: white; padding: 4px 10px; border-radius: 4px; text-decoration: none; display: inline-block; margin-right: 8px; font-size: 12px;" target="_blank">Book Hotel</a>` : ''}
+                            ${tripAdvisorHref ? `<a href="${tripAdvisorHref}" style="color: #0284c7; text-decoration: none; margin-right: 8px;" target="_blank">TripAdvisor Reviews</a>` : ''}
                         </div>
                     </div>
                 `;
             }).join('');
 
             const activitiesHtml = (dest.recommendedActivities || []).map(act => {
-                const mapQuery = encodeURIComponent(`${act.name} ${act.location || dest.cityName}`);
+                const mapQuery = encodeURIComponent(`${act.name || ''} ${act.location || dest.cityName || ''}`);
+                const actHref = safeHttpUrl(act.website || act.bookingUrl);
+                const actTaHref = safeHttpUrl(act.tripadvisorUrl);
                 return `
                     <div style="background: white; border-radius: 6px; padding: 12px; margin: 8px 0; border: 1px solid #e2e8f0;">
                         <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;">
-                            <strong style="color: #1f2937; font-size: 15px;">${act.name}</strong>
-                            ${act.estimatedCost?.cashAmount > 0 || typeof act.estimatedCost === 'number' ? `<span style="color: #059669; font-weight: 600; font-size: 13px;">$${act.estimatedCost?.cashAmount || act.estimatedCost}</span>` : '<span style="color: #6b7280; font-size: 12px;">Free / Included</span>'}
+                            <strong style="color: #1f2937; font-size: 15px;">${escapeHtml(act.name)}</strong>
+                            ${act.estimatedCost?.cashAmount > 0 || typeof act.estimatedCost === 'number' ? `<span style="color: #059669; font-weight: 600; font-size: 13px;">$${Number(act.estimatedCost?.cashAmount || act.estimatedCost)}</span>` : '<span style="color: #6b7280; font-size: 12px;">Free / Included</span>'}
                         </div>
                         <p style="color: #6b7280; margin: 2px 0 6px 0; font-size: 12px;">
-                            🏷️ ${act.category || 'Sightseeing'} ${act.estimatedDuration ? `· ⏱️ ${act.estimatedDuration}` : ''} · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${act.location || dest.cityName} 🗺️</a>
+                            🏷️ ${escapeHtml(act.category || 'Sightseeing')} ${act.estimatedDuration ? `· ⏱️ ${escapeHtml(act.estimatedDuration)}` : ''} · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${escapeHtml(act.location || dest.cityName)} 🗺️</a>
                         </p>
-                        <p style="color: #4b5563; margin: 4px 0; font-size: 13px;">${act.description || ''}</p>
+                        <p style="color: #4b5563; margin: 4px 0; font-size: 13px;">${escapeHtml(act.description || '')}</p>
                         <div style="margin-top: 6px; font-size: 12px;">
-                            ${act.website || act.bookingUrl ? `<a href="${act.website || act.bookingUrl}" style="color: #2563eb; text-decoration: none; margin-right: 10px;" target="_blank">🌐 Official Website</a>` : ''}
-                            ${act.tripadvisorUrl ? `<a href="${act.tripadvisorUrl}" style="color: #0284c7; text-decoration: none; margin-right: 10px;" target="_blank">🦉 TripAdvisor</a>` : ''}
+                            ${actHref ? `<a href="${actHref}" style="color: #2563eb; text-decoration: none; margin-right: 10px;" target="_blank">🌐 Official Website</a>` : ''}
+                            ${actTaHref ? `<a href="${actTaHref}" style="color: #0284c7; text-decoration: none; margin-right: 10px;" target="_blank">🦉 TripAdvisor</a>` : ''}
                         </div>
                     </div>
                 `;
             }).join('');
 
             const restaurantsHtml = (dest.recommendedRestaurants || []).map(rest => {
-                const mapQuery = encodeURIComponent(`${rest.name} ${rest.location || dest.cityName}`);
-                const yelpSearchUrl = rest.yelpUrl || `https://www.yelp.com/search?find_desc=${encodeURIComponent(rest.name)}&find_loc=${encodeURIComponent(rest.location || dest.cityName)}`;
+                const mapQuery = encodeURIComponent(`${rest.name || ''} ${rest.location || dest.cityName || ''}`);
+                const yelpSearchUrl = safeHttpUrl(rest.yelpUrl) || `https://www.yelp.com/search?find_desc=${encodeURIComponent(rest.name || '')}&find_loc=${encodeURIComponent(rest.location || dest.cityName || '')}`;
+                const restWebsiteHref = safeHttpUrl(rest.website);
                 return `
                     <div style="background: white; border-radius: 6px; padding: 12px; margin: 8px 0; border: 1px solid #e2e8f0;">
                         <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;">
-                            <strong style="color: #1f2937; font-size: 15px;">${rest.name}</strong>
-                            <span style="color: #d97706; font-weight: bold; font-size: 13px;">${rest.priceRange || '$$'}</span>
+                            <strong style="color: #1f2937; font-size: 15px;">${escapeHtml(rest.name)}</strong>
+                            <span style="color: #d97706; font-weight: bold; font-size: 13px;">${escapeHtml(rest.priceRange || '$$')}</span>
                         </div>
                         <p style="color: #6b7280; margin: 2px 0 6px 0; font-size: 12px;">
-                            🍴 ${rest.cuisine || 'Local Cuisine'} · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${rest.location || dest.cityName} 🗺️</a>
+                            🍴 ${escapeHtml(rest.cuisine || 'Local Cuisine')} · 📍 <a href="https://www.google.com/maps/search/?api=1&query=${mapQuery}" style="color: #2563eb; text-decoration: none;" target="_blank">${escapeHtml(rest.location || dest.cityName)} 🗺️</a>
                         </p>
-                        <p style="color: #4b5563; margin: 4px 0; font-size: 13px;">${rest.description || ''}</p>
+                        <p style="color: #4b5563; margin: 4px 0; font-size: 13px;">${escapeHtml(rest.description || '')}</p>
                         <div style="margin-top: 6px; font-size: 12px;">
                             <a href="${yelpSearchUrl}" style="color: #dc2626; text-decoration: none; margin-right: 10px;" target="_blank">🔴 Yelp Reviews</a>
-                            ${rest.website ? `<a href="${rest.website}" style="color: #2563eb; text-decoration: none; margin-right: 10px;" target="_blank">🌐 Website</a>` : ''}
+                            ${restWebsiteHref ? `<a href="${restWebsiteHref}" style="color: #2563eb; text-decoration: none; margin-right: 10px;" target="_blank">🌐 Website</a>` : ''}
                         </div>
                     </div>
                 `;
@@ -654,10 +717,10 @@ async function sendDetailedItineraryNotification(tripId, tripData) {
             return `
                 <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; padding: 18px; margin: 18px 0;">
                     <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 12px;">
-                        <h3 style="color: #1e3a8a; margin: 0; font-size: 20px;">📍 ${dest.cityName}</h3>
-                        <span style="background: #e0e7ff; color: #3730a3; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;">${dest.numberOfNights || 1} ${(dest.numberOfNights || 1) === 1 ? 'Night' : 'Nights'} (${dest.arrivalDate || ''} - ${dest.departureDate || ''})</span>
+                        <h3 style="color: #1e3a8a; margin: 0; font-size: 20px;">📍 ${escapeHtml(dest.cityName)}</h3>
+                        <span style="background: #e0e7ff; color: #3730a3; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;">${Number(dest.numberOfNights || 1)} ${(dest.numberOfNights || 1) === 1 ? 'Night' : 'Nights'} (${escapeHtml(dest.arrivalDate || '')} - ${escapeHtml(dest.departureDate || '')})</span>
                     </div>
-                    ${dest.overview ? `<p style="color: #475569; font-style: italic; font-size: 14px; margin-bottom: 16px;">${dest.overview}</p>` : ''}
+                    ${dest.overview ? `<p style="color: #475569; font-style: italic; font-size: 14px; margin-bottom: 16px;">${escapeHtml(dest.overview)}</p>` : ''}
                     
                     ${hotelsHtml ? `
                         <div style="margin: 14px 0;">
@@ -712,13 +775,13 @@ async function sendDetailedItineraryNotification(tripId, tripData) {
             <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 650px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #1f2937;">
                 <div style="text-align: center; background: linear-gradient(135deg, #0ea5e9 0%, #3b82f6 100%); color: white; padding: 32px 20px; border-radius: 12px; margin-bottom: 24px;">
                     <h1 style="margin: 0; font-size: 26px; font-weight: 700;">🎉 Your Itinerary is Ready!</h1>
-                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">Personalized travel recommendations for ${destinationsTitle}</p>
+                    <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">Personalized travel recommendations for ${escapeHtml(destinationsTitle)}</p>
                 </div>
                 
                 <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e2e8f0;">
-                    <h2 style="color: #1e40af; margin-top: 0; font-size: 18px;">Hi ${userName}! 👋</h2>
+                    <h2 style="color: #1e40af; margin-top: 0; font-size: 18px;">Hi ${escapeHtml(userName)}! 👋</h2>
                     <p style="margin-bottom: 8px;">Your personalized WanderMint travel itinerary is complete! We've handpicked accommodations, curated sights, and mapped out top dining spots for your trip.</p>
-                    ${overviewText ? `<p style="font-style: italic; color: #475569; background: white; padding: 12px; border-radius: 6px; border-left: 3px solid #3b82f6; margin-top: 10px;">"${overviewText}"</p>` : ''}
+                    ${overviewText ? `<p style="font-style: italic; color: #475569; background: white; padding: 12px; border-radius: 6px; border-left: 3px solid #3b82f6; margin-top: 10px;">"${escapeHtml(overviewText)}"</p>` : ''}
                 </div>
                 
                 ${contentHtml}
@@ -737,7 +800,7 @@ async function sendDetailedItineraryNotification(tripId, tripData) {
     };
 
     await sendEmail(msg);
-    console.log(`Detailed itinerary email sent for trip: ${tripId} (User: ${userName}, Email: ${userEmail})`);
+    console.log(`Detailed itinerary email sent for trip: ${tripId}`);
 }
 
 // Handle trip status updates
@@ -843,6 +906,13 @@ async function sendConversationEmailNotification(conversationId, messageData, tr
     const destination = tripData.destinations ? tripData.destinations.join(' → ') : tripData.destination;
     const isUrgent = messageData.metadata?.urgency === 'high' || messageData.metadata?.urgency === 'urgent';
     
+    const safeDestination = escapeHtml(destination);
+    const safeUserName = escapeHtml(userName);
+    const safeUserId = escapeHtml(tripData.userId);
+    const safeContent = escapeHtml(messageData.content);
+    const safeCategory = escapeHtml(messageData.metadata?.category);
+    const safeConversationParam = encodeURIComponent(conversationId);
+
     const msg = {
         to: 'nchristus93@gmail.com',
         from: 'noreply@wandermint.io',
@@ -857,16 +927,16 @@ async function sendConversationEmailNotification(conversationId, messageData, tr
                 <div style="background: white; padding: 24px; border: 1px solid #e5e7eb; border-top: none;">
                     <div style="background: #f8f9fa; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
                         <h3 style="margin: 0 0 8px 0; color: #1f2937;">📍 Trip Details</h3>
-                        <p style="margin: 4px 0;"><strong>Destination:</strong> ${destination}</p>
-                        <p style="margin: 4px 0;"><strong>Dates:</strong> ${tripData.startDate?.toDate?.()?.toLocaleDateString() || 'Not specified'} - ${tripData.endDate?.toDate?.()?.toLocaleDateString() || 'Not specified'}</p>
-                        <p style="margin: 4px 0;"><strong>Traveler:</strong> ${userName}</p>
-                        <p style="margin: 4px 0;"><strong>User ID:</strong> ${tripData.userId}</p>
+                        <p style="margin: 4px 0;"><strong>Destination:</strong> ${safeDestination}</p>
+                        <p style="margin: 4px 0;"><strong>Dates:</strong> ${escapeHtml(tripData.startDate?.toDate?.()?.toLocaleDateString() || 'Not specified')} - ${escapeHtml(tripData.endDate?.toDate?.()?.toLocaleDateString() || 'Not specified')}</p>
+                        <p style="margin: 4px 0;"><strong>Traveler:</strong> ${safeUserName}</p>
+                        <p style="margin: 4px 0;"><strong>User ID:</strong> ${safeUserId}</p>
                     </div>
                     
                     <div style="background: #e0f2fe; padding: 16px; border-radius: 8px; border-left: 4px solid #0ea5e9;">
                         <h4 style="margin: 0 0 8px 0; color: #0c4a6e;">💬 Message:</h4>
-                        <p style="margin: 0; color: #164e63; font-size: 16px; line-height: 1.5;">${messageData.content}</p>
-                        ${messageData.metadata?.category ? `<p style="margin: 8px 0 0 0; color: #0369a1; font-size: 14px;"><strong>Category:</strong> ${messageData.metadata.category}</p>` : ''}
+                        <p style="margin: 0; color: #164e63; font-size: 16px; line-height: 1.5;">${safeContent}</p>
+                        ${messageData.metadata?.category ? `<p style="margin: 8px 0 0 0; color: #0369a1; font-size: 14px;"><strong>Category:</strong> ${safeCategory}</p>` : ''}
                     </div>
                     
                     ${isUrgent ? `
@@ -880,7 +950,7 @@ async function sendConversationEmailNotification(conversationId, messageData, tr
                     <p style="margin: 0 0 16px 0; color: #6b7280; font-size: 14px;">
                         💡 <strong>Quick Response:</strong> Access your admin dashboard to respond to this message.
                     </p>
-                    <a href="https://travel-consulting-app-1.web.app?conversation=${conversationId}" 
+                    <a href="https://travel-consulting-app-1.web.app?conversation=${safeConversationParam}" 
                        style="background: #0ea5e9; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block;">
                         View Conversation
                     </a>
@@ -890,23 +960,11 @@ async function sendConversationEmailNotification(conversationId, messageData, tr
     };
     
     try {
-        console.log('📧 Attempting to send email:', {
-            to: msg.to,
-            from: msg.from,
-            subject: msg.subject,
-            conversationId: conversationId
-        });
-        
-        const result = await sendEmail(msg);
-        console.log('✅ Email notification sent:', result);
-        console.log(`Conversation email notification sent for: ${conversationId} (${userName})`);
+        console.log(`📧 Sending conversation notification email for conversation ${conversationId}`);
+        await sendEmail(msg);
+        console.log(`✅ Conversation email notification sent for: ${conversationId}`);
     } catch (error) {
-        console.error('❌ Error sending conversation email:', error);
-        console.error('📋 SendGrid error code:', error.code);
-        if (error.response && error.response.body && error.response.body.errors) {
-            console.error('📋 SendGrid error details:', error.response.body.errors);
-        }
-        console.error('📋 Full error details:', JSON.stringify(error, null, 2));
+        console.error('❌ Error sending conversation email:', error.code || error.message);
         throw error;
     }
 }
@@ -920,12 +978,10 @@ exports.googlePlacesProxy = onRequest(
         region: "us-central1",
         memory: "256MiB",
         timeoutSeconds: 30,
-        cors: true
+        cors: ALLOWED_CORS_ORIGINS
     },
     async (req, res) => {
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        applyCorsHeaders(req, res, 'GET, POST, OPTIONS');
 
         if (req.method === 'OPTIONS') {
             res.status(200).send('');
@@ -940,6 +996,10 @@ exports.googlePlacesProxy = onRequest(
             const { query, placeId, type = 'hotels' } = req.query;
 
             if (placeId) {
+                if (typeof placeId !== 'string' || !PLACE_ID_REGEX.test(placeId)) {
+                    return res.status(400).json({ success: false, error: 'Invalid placeId format' });
+                }
+
                 // Fetch Details for a specific place using Places API (New)
                 const fieldMask = [
                     'id',
@@ -965,13 +1025,12 @@ exports.googlePlacesProxy = onRequest(
                 const place = await response.json();
 
                 if (!response.ok) {
-                    return res.status(response.status).json({ success: false, error: place.error?.message || 'Place details request failed' });
+                    return res.status(response.status).json({ success: false, error: 'Place details request failed' });
                 }
 
                 let photoUrl = null;
                 if (place.photos && place.photos.length > 0) {
-                    const photoName = place.photos[0].name;
-                    photoUrl = `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=800&maxWidthPx=800&key=${apiKey}`;
+                    photoUrl = await resolvePublicPhotoUrl(place.photos[0].name, apiKey) || null;
                 }
 
                 return res.json({
@@ -984,13 +1043,17 @@ exports.googlePlacesProxy = onRequest(
                         address: place.formattedAddress || '',
                         location: place.formattedAddress || '',
                         description: place.editorialSummary?.text || `${place.displayName?.text || ''} - ${type}`,
-                        mapsUrl: place.googleMapsUri || `https://www.google.com/maps/place/?q=place_id:${placeId}`,
+                        mapsUrl: place.googleMapsUri || `https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(placeId)}`,
                         website: place.websiteUri || null,
                         photoUrl: photoUrl,
                         phone: place.nationalPhoneNumber || ''
                     }
                 });
             } else if (query) {
+                if (typeof query !== 'string' || query.trim().length === 0 || query.length > 200) {
+                    return res.status(400).json({ success: false, error: 'Invalid search query' });
+                }
+
                 // Search Places by Text Query using Places API (New)
                 const fieldMask = [
                     'places.id',
@@ -1012,7 +1075,7 @@ exports.googlePlacesProxy = onRequest(
                         'X-Goog-FieldMask': fieldMask
                     },
                     body: JSON.stringify({
-                        textQuery: query,
+                        textQuery: query.trim(),
                         languageCode: 'en'
                     })
                 });
@@ -1020,14 +1083,14 @@ exports.googlePlacesProxy = onRequest(
                 const data = await response.json();
 
                 if (!response.ok) {
-                    return res.status(response.status).json({ success: false, error: data.error?.message || 'Places search request failed' });
+                    return res.status(response.status).json({ success: false, error: 'Places search request failed' });
                 }
 
-                const results = (data.places || []).slice(0, 10).map(p => {
+                const topPlaces = (data.places || []).slice(0, 10);
+                const results = await Promise.all(topPlaces.map(async (p) => {
                     let photoUrl = '';
                     if (p.photos && p.photos.length > 0) {
-                        const photoName = p.photos[0].name;
-                        photoUrl = `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=800&maxWidthPx=800&key=${apiKey}`;
+                        photoUrl = await resolvePublicPhotoUrl(p.photos[0].name, apiKey);
                     }
                     return {
                         id: p.id,
@@ -1042,7 +1105,7 @@ exports.googlePlacesProxy = onRequest(
                         bookingUrl: p.websiteUri || p.googleMapsUri || '',
                         googleMapsUrl: p.googleMapsUri || ''
                     };
-                });
+                }));
 
                 return res.json({ status: 'success', data: results, success: true, results });
             } else {
@@ -1050,7 +1113,7 @@ exports.googlePlacesProxy = onRequest(
             }
         } catch (error) {
             console.error('Google Places Proxy Error:', error);
-            return res.status(500).json({ error: 'Failed to process Google Places request', details: error.message });
+            return res.status(500).json({ success: false, error: 'Failed to process Google Places request' });
         }
     }
 );
@@ -1061,15 +1124,13 @@ exports.googlePlacesProxy = onRequest(
  */
 exports.copilotChat = onRequest(
     {
-        cors: true,
+        cors: ALLOWED_CORS_ORIGINS,
         region: "us-central1",
         memory: "512MiB",
         timeoutSeconds: 60
     },
     async (req, res) => {
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        applyCorsHeaders(req, res, 'POST, OPTIONS');
 
         if (req.method === 'OPTIONS') {
             return res.status(200).send('');
@@ -1084,7 +1145,7 @@ exports.copilotChat = onRequest(
 
         try {
             const { message, history = [], tripContext = {}, currentRecommendation = null, apiKey } = req.body || {};
-            if (!message) {
+            if (!message || typeof message !== 'string') {
                 return res.status(400).json({ success: false, error: 'Message is required' });
             }
 
@@ -1101,8 +1162,8 @@ exports.copilotChat = onRequest(
             console.error('copilotChat error:', error);
             return res.status(500).json({
                 success: false,
-                error: error.message,
-                reply: `Sorry, I encountered an error: ${error.message}`
+                error: 'Copilot processing failed',
+                reply: 'Sorry, I encountered a temporary error processing your request. Please try again.'
             });
         }
     }
@@ -1111,10 +1172,11 @@ exports.copilotChat = onRequest(
 // On-demand AI Trip Recommendation & Dossier Generation Endpoint
 exports.generateTripRecommendation = onRequest(
     {
-        cors: true,
+        cors: ALLOWED_CORS_ORIGINS,
         region: "us-central1"
     },
     async (req, res) => {
+        applyCorsHeaders(req, res, 'POST, OPTIONS');
         try {
             if (req.method === 'OPTIONS') {
                 return res.status(200).send('');
@@ -1130,7 +1192,7 @@ exports.generateTripRecommendation = onRequest(
             const geminiApiKey = process.env.GEMINI_API_KEY;
 
             if (!geminiApiKey) {
-                return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
+                return res.status(500).json({ error: 'AI service is not configured on the server.' });
             }
 
             let tripData = customTripData;
@@ -1140,7 +1202,7 @@ exports.generateTripRecommendation = onRequest(
             if (tripId && !tripData) {
                 const tripDoc = await db.collection('trips').doc(tripId).get();
                 if (!tripDoc.exists) {
-                    return res.status(404).json({ error: `Trip document ${tripId} not found.` });
+                    return res.status(404).json({ error: 'Trip document not found.' });
                 }
                 tripData = tripDoc.data();
 
@@ -1167,7 +1229,7 @@ exports.generateTripRecommendation = onRequest(
                 return res.status(400).json({ error: 'Either tripId or tripData must be provided.' });
             }
 
-            console.log(`🤖 On-demand AI itinerary generation requested for: ${tripData.destination || tripData.destinations?.[0]}`);
+            console.log(`🤖 On-demand AI itinerary generation requested for trip ${tripId || 'custom'}`);
             const aiResult = await generateTripDossierAndDraft(tripData, pointsData, geminiApiKey);
 
             // If tripId was passed, save the draft recommendation back to Firestore
@@ -1191,7 +1253,7 @@ exports.generateTripRecommendation = onRequest(
 
         } catch (error) {
             console.error('generateTripRecommendation error:', error);
-            return res.status(500).json({ error: 'AI generation failed', details: error.message });
+            return res.status(500).json({ success: false, error: 'AI generation failed' });
         }
     }
 );
@@ -1202,15 +1264,13 @@ exports.generateTripRecommendation = onRequest(
  */
 exports.deleteUserAccount = onRequest(
     {
-        cors: true,
+        cors: ALLOWED_CORS_ORIGINS,
         region: "us-central1",
         memory: "512MiB",
         timeoutSeconds: 60
     },
     async (req, res) => {
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'POST, DELETE, OPTIONS');
-        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        applyCorsHeaders(req, res, 'POST, DELETE, OPTIONS');
 
         if (req.method === 'OPTIONS') {
             return res.status(200).send('');
@@ -1262,7 +1322,7 @@ exports.deleteUserAccount = onRequest(
             return res.status(200).json({ success: true });
         } catch (error) {
             console.error(`Error deleting account for user ${uid}:`, error);
-            return res.status(500).json({ success: false, error: 'Failed to delete account', details: error.message });
+            return res.status(500).json({ success: false, error: 'Failed to delete account' });
         }
     }
 );
