@@ -1,0 +1,39 @@
+name: Security Audit & Backend Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Weekly Monday 14:00 UTC check for newly disclosed npm CVEs
+    - cron: '0 14 * * 1'
+  workflow_dispatch:
+
+jobs:
+  security-and-tests:
+    name: OWASP Tests & Production CVE Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install dependencies
+        working-directory: functions
+        run: npm ci
+
+      - name: Run full Jest suite (schemas, contracts, OWASP security)
+        working-directory: functions
+        run: npm test
+
+      - name: Enforce zero High/Critical production CVEs
+        working-directory: functions
+        run: npm audit --omit=dev --audit-level=high
