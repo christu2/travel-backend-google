@@ -3,6 +3,7 @@ const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
+const { getMessaging } = require("firebase-admin/messaging");
 const { validateTripSubmissionData, validateRecommendationData } = require("./schemas");
 const { generateTripDossierAndDraft, formatDossierEmailHtml, handleCopilotChat } = require("./geminiService");
 
@@ -11,6 +12,68 @@ initializeApp();
 
 const db = getFirestore();
 const auth = getAuth();
+const messaging = getMessaging();
+
+/**
+ * Sends an APNs/FCM push notification to all registered devices for a user,
+ * respecting their pushNotificationsEnabled opt-out flag and pruning stale tokens.
+ */
+async function sendPushToUser(userId, { title, body, data = {} }) {
+    if (!userId) return { sent: 0 };
+    try {
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) return { sent: 0 };
+        const userData = userDoc.data() || {};
+        if (userData.pushNotificationsEnabled === false) {
+            return { sent: 0, skipped: 'opted_out' };
+        }
+        const tokens = Array.isArray(userData.fcmTokens)
+            ? [...new Set(userData.fcmTokens.filter(t => typeof t === 'string' && t.length > 0))]
+            : [];
+        if (tokens.length === 0) return { sent: 0, skipped: 'no_tokens' };
+
+        const stringData = Object.fromEntries(
+            Object.entries(data).map(([k, v]) => [k, String(v ?? '')])
+        );
+
+        const response = await messaging.sendEachForMulticast({
+            tokens,
+            notification: { title, body },
+            data: stringData,
+            apns: {
+                payload: {
+                    aps: {
+                        sound: 'default',
+                        badge: 1
+                    }
+                }
+            }
+        });
+
+        const staleTokens = [];
+        response.responses.forEach((resp, idx) => {
+            if (!resp.success) {
+                const code = resp.error?.code || '';
+                if (code === 'messaging/registration-token-not-registered' ||
+                    code === 'messaging/invalid-registration-token') {
+                    staleTokens.push(tokens[idx]);
+                }
+            }
+        });
+
+        if (staleTokens.length > 0) {
+            await db.collection('users').doc(userId).update({
+                fcmTokens: FieldValue.arrayRemove(...staleTokens)
+            });
+        }
+
+        console.log(`📲 Push sent to user ${userId}: ${response.successCount}/${tokens.length} succeeded`);
+        return { sent: response.successCount, pruned: staleTokens.length };
+    } catch (err) {
+        console.warn(`Push notification error for user ${userId}:`, err.code || err.message);
+        return { sent: 0, error: err.message };
+    }
+}
 
 // Explicit CORS origin allowlist (native iOS clients ignore CORS; web requests are restricted)
 const ALLOWED_CORS_ORIGINS = [
@@ -814,10 +877,21 @@ exports.onTripStatusUpdate = onDocumentUpdated(
         const beforeData = event.data.before.data();
         const afterData = event.data.after.data();
         
-        // Send detailed itinerary notification when trip is completed (respecting user opt-in)
+        // Send detailed itinerary notification & push when trip is completed (respecting user preferences)
         if (beforeData.status !== 'completed' && afterData.status === 'completed') {
             console.log(`Trip completed: ${tripId}`);
             
+            const destinationsTitle = afterData.destinations?.join(', ') || afterData.destination || 'your trip';
+            await sendPushToUser(afterData.userId, {
+                title: 'Your Itinerary is Ready! ✈️',
+                body: `Your personalized ${destinationsTitle} plan is ready to view in WanderMint.`,
+                data: {
+                    type: 'trip_ready',
+                    tripId,
+                    action: 'open_trip'
+                }
+            });
+
             if (afterData.optInEmailNotifications === false) {
                 console.log(`Skipping itinerary completion email for trip ${tripId}: user opted out of email notifications.`);
             } else {
@@ -841,7 +915,7 @@ exports.onTripStatusUpdate = onDocumentUpdated(
     }
 );
 
-// Send conversation notification when user sends feedback
+// Send email notification to admin on user messages, and push notification to user on admin replies
 exports.sendConversationNotification = onDocumentCreated(
     {
         document: 'tripConversations/{conversationId}/messages/{messageId}',
@@ -849,10 +923,32 @@ exports.sendConversationNotification = onDocumentCreated(
     },
     async (event) => {
         const conversationId = event.params.conversationId;
-        const messageId = event.params.messageId;
         const messageData = event.data.data();
+
+        // Admin reply → send FCM push notification to the traveler
+        if (messageData.senderType === 'admin') {
+            try {
+                const convDoc = await db.collection('tripConversations').doc(conversationId).get();
+                if (!convDoc.exists) return;
+                const convData = convDoc.data();
+                const preview = String(messageData.content || 'You have a new message from your travel planner.').slice(0, 120);
+                await sendPushToUser(convData.userId, {
+                    title: 'New Message from Your Travel Planner',
+                    body: preview,
+                    data: {
+                        type: 'admin_message',
+                        tripId: convData.tripId || '',
+                        conversationId,
+                        action: 'open_conversation'
+                    }
+                });
+            } catch (err) {
+                console.warn(`Error sending admin reply push for conversation ${conversationId}:`, err.message);
+            }
+            return;
+        }
         
-        // Only send notifications for user messages
+        // Only send admin email notifications for user messages
         if (messageData.senderType !== 'user') return;
         
         console.log(`New user message in conversation: ${conversationId}`);

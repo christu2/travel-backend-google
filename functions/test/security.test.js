@@ -80,4 +80,10 @@ describe('Backend Security Hardening Checks', () => {
         expect(indexSrc).not.toContain('JSON.stringify(error');
         expect(indexSrc).not.toContain('Email: ${userEmail}');
     });
+
+    test('Push Notifications: sendPushToUser respects opt-out and prunes stale FCM tokens', () => {
+        expect(indexSrc).toContain('pushNotificationsEnabled === false');
+        expect(indexSrc).toContain('messaging.sendEachForMulticast');
+        expect(indexSrc).toContain('FieldValue.arrayRemove(...staleTokens)');
+    });
 });
